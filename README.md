@@ -1,9 +1,5 @@
 # Testes JS Postman
 
-[Tabela_Testes_Backend_VidyaForce.xlsx](Tabela_Testes_Backend_VidyaForce.xlsx)
-
-[https://animaedu-my.sharepoint.com/:x:/r/personal/123112959_ulife_com_br/Documents/Tabela_Testes_Backend_VidyaForce.xlsx?d=wc5f2b1d7f26947b58fdbff1fc70f0641&csf=1&web=1&e=aL4dhk](https://animaedu-my.sharepoint.com/:x:/r/personal/123112959_ulife_com_br/Documents/Tabela_Testes_Backend_VidyaForce.xlsx?d=wc5f2b1d7f26947b58fdbff1fc70f0641&csf=1&web=1&e=aL4dhk)
-
 ### Resumo
 
 Os **helpers** funcionam como o núcleo lógico: identificam módulo, contexto, tipo de cenário (positivo/negativo), padrão de resposta e configuram automaticamente flags de *skip* por módulo. Isso permite que todos os testes (Smoke, Contrato, Funcionais, Fluxo, SLA, Segurança, Qualidade de Dados) sejam **dinâmicos e reutilizáveis**, sem necessidade de escrever lógica duplicada para cada endpoint.
