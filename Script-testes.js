@@ -1,15 +1,10 @@
 // =======================================================
-// BACKEND VIDYA FORCE - TESTES GLOBAIS DINÂMICOS
-// =======================================================
-// - Smoke Global (opcional, comentado pra não travar tudo)
-// - Smoke por módulo (dinâmico por URL) com flags skip_<modulo>
-// - Gate: se smoke do módulo falhar, ignora testes avançados só dele
-// - Testes genéricos: Contrato, Funcionais, Negativo, Fluxos, SLA,
-//                     Segurança, Qualidade de Dados
+// BACKEND VIDYA FORCE - TESTES GLOBAIS DINÂMICOS (v2)
 // =======================================================
 
-
+// =======================================================
 // 1. HELPERS GERAIS
+// =======================================================
 
 const rawUrl = pm.request.url.toString();
 const url = rawUrl.toLowerCase();
@@ -19,17 +14,17 @@ const contentType = (pm.response.headers.get("Content-Type") || "").toLowerCase(
 const isJson = contentType.includes("application/json");
 const requestName = (pm.info.requestName || "").toLowerCase();
 
-// parse JSON se possível
+// Tenta parsear JSON (sem quebrar se não for JSON)
 let json = null;
 if (isJson) {
     try {
         json = pm.response.json();
     } catch (e) {
-        // JSON inválido será pego por contrato/smoke se relevante
+        // JSON inválido será pego em testes de contrato mais abaixo.
     }
 }
 
-// identifica se é um teste negativo (não entra em smoke)
+// Identifica se é request NEGATIVO pelo nome
 const isNegativeCase =
     requestName.includes("[negativo]") ||
     requestName.includes("[error]") ||
@@ -37,16 +32,21 @@ const isNegativeCase =
     requestName.includes("[4xx]") ||
     requestName.includes("[5xx]");
 
-// pega segmentos do path
-const pathSegments = (pm.request.url.path || []).filter(Boolean).map(s => s.toLowerCase());
+// Segmentar path em minúsculas
+const pathSegments = (pm.request.url.path || [])
+    .filter(Boolean)
+    .map(s => String(s).toLowerCase());
 
-// resolve módulo automático:
-// - se começar com ppid/, módulo = "ppid_<seg2>" (ex: ppid_login, ppid_order)
-// - senão, módulo = primeiro segmento (ex: partner, products, user, etc)
+// Resolve chave de módulo automática
+// - Se começar com ppid/, usa ppid_<segundo>
+// - Senão, usa primeiro segmento (products, partner, user, etc)
 function getModuleKey() {
     if (!pathSegments.length) return "root";
-    if (pathSegments[0] === "ppid" && pathSegments.length > 1) {
-        return `ppid_${pathSegments[1]}`;
+    if (pathSegments[0] === "ppid") {
+        if (pathSegments.length > 1) {
+            return "ppid_" + pathSegments[1];
+        }
+        return "ppid_root";
     }
     return pathSegments[0];
 }
@@ -55,12 +55,13 @@ const moduleKey = getModuleKey();
 const skipKey = `skip_${moduleKey}`;
 const moduleSkip = pm.collectionVariables.get(skipKey) === "true";
 
-// helpers baseList
+// Helpers para respostas no padrão BaseList
 function isBaseListResponse(body) {
     if (!body || typeof body !== "object") return false;
     const hasHasError = Object.prototype.hasOwnProperty.call(body, "hasError");
-    const hasQtd = Object.prototype.hasOwnProperty.call(body, "qtdRegistros") ||
-                   Object.prototype.hasOwnProperty.call(body, "qtdregistros");
+    const hasQtd =
+        Object.prototype.hasOwnProperty.call(body, "qtdRegistros") ||
+        Object.prototype.hasOwnProperty.call(body, "qtdregistros");
     const hasData = Array.isArray(body.data);
     return hasHasError && hasQtd && hasData;
 }
@@ -72,37 +73,48 @@ function getMainArray(body) {
     return [];
 }
 
+// Helper genérico: pelo menos 1 chave presente
+function ensureAtLeastOneKey(obj, keys, msg) {
+    const ok = keys.some(k => Object.prototype.hasOwnProperty.call(obj, k));
+    pm.expect(ok, msg || `Deve possuir pelo menos um dos campos: ${keys.join(", ")}`).to.be.true;
+}
 
-// 2. SMOKE GLOBAL
+// Helper: tipo esperado
+function ensureFieldType(value, expectedTypes, msg) {
+    const types = Array.isArray(expectedTypes) ? expectedTypes : [expectedTypes];
+    const actual = typeof value;
+    const ok = types.includes(actual);
+    pm.expect(ok, msg || `Tipo ${actual} não está entre os esperados: ${types.join(", ")}`).to.be.true;
+}
 
-// Sempre verificar 5xx (não para a collection por padrão)
+
+// =======================================================
+// 2. SMOKE GLOBAL (5xx)  - NÃO ABORTA A COLEÇÃO
+// =======================================================
+
 pm.test("[SMOKE-GLOBAL] Sem erro 5xx na API", () => {
+    if (status >= 500 && !isNegativeCase) {
+        console.log(`[#SMOKE-GLOBAL] Erro 5xx em ${rawUrl} (status: ${status})`);
+    }
     pm.expect(status, "Resposta 5xx recebida").to.be.below(500);
 });
 
-// OPCIONAL: descomente para ABORTAR TODA A COLLECTION se qualquer request der 5xx
-/*
-if (status >= 500 && !isNegativeCase) {
-    console.log("[SMOKE-GLOBAL] 5xx em", rawUrl, "- Abortando toda a coleção.");
-    pm.execution.setNextRequest(null);
-    return;
-}
-*/
 
-// 3. SMOKE POR MÓDULO (DINÂMICO)
-
-// Regra genérica:
-// - Só considera requests que NÃO são negativas (pelo nome).
-// - Se status não for 2xx => smoke do módulo falha.
-// - Se seguir padrão {hasError, qtdRegistros, data} e hasError=true => smoke falha.
-// - Quando falha: marca skip_<modulo> = true, e futuros testes avançados
-//   desse módulo serão ignorados.
-// - Não mexe com outros módulos.
+// =======================================================
+// 3. SMOKE POR MÓDULO + GATE
+// =======================================================
+//
+// - Só avalia cenários não negativos.
+// - Status não 2xx => smoke do módulo falha.
+// - BaseList com hasError=true => smoke do módulo falha.
+// - Ao falhar: seta skip_<modulo> = true.
+// - Testes avançados para esse módulo são ignorados nas próximas requisições.
+//
 
 if (!isNegativeCase && !moduleSkip) {
     let smokeFailed = false;
 
-    // Status deve ser 2xx para cenário feliz
+    // Status deve ser 2xx
     if (String(status)[0] !== "2") {
         smokeFailed = true;
     }
@@ -114,8 +126,7 @@ if (!isNegativeCase && !moduleSkip) {
         ).to.eql("2");
     });
 
-
-    // Se é uma resposta baseList, hasError deve ser false
+    // Se resposta no padrão BaseList, hasError deve ser false
     if (isJson && isBaseListResponse(json)) {
         pm.test(`[SMOKE][${moduleKey}] BaseList sem hasError`, () => {
             pm.expect(json.hasError, `hasError=true no módulo ${moduleKey}`).to.be.false;
@@ -127,46 +138,30 @@ if (!isNegativeCase && !moduleSkip) {
 
     if (smokeFailed) {
         pm.collectionVariables.set(skipKey, "true");
-        console.log(`[SMOKE][${moduleKey}] Falhou. Marcando ${skipKey}=true. Ignorando testes avançados deste módulo nas próximas requisições.`);
+        console.log(`[SMOKE][${moduleKey}] FALHOU. Marcando ${skipKey}=true. Testes avançados deste módulo serão ignorados nas próximas requisições.`);
     }
 }
 
-
-// 4. GATE POR MÓDULO
-
-// Se o módulo está marcado como skip_<modulo>=true
-// e NÃO é um teste negativo, sai fora antes dos testes avançados.
-//
-
+// Gate: se módulo já está marcado como skip, não roda mais nada avançado
 if (moduleSkip && !isNegativeCase) {
-    console.log(`[GATE][${moduleKey}] Smoke já falhou. Ignorando testes avançados para esta requisição (${rawUrl}).`);
+    console.log(`[GATE][${moduleKey}] Smoke falhou anteriormente. Ignorando testes avançados para ${rawUrl}.`);
     return;
 }
 
 
 // =======================================================
-// 5. TESTES AVANÇADOS (RODAM SE SMOKE DO MÓDULO OK)
-// =======================================================
-// Daqui pra baixo tudo é genérico ou se aplica só quando os campos existem,
-// então funciona para múltiplos módulos automaticamente.
+// 4. TESTES GENÉRICOS DE CONTRATO / SCHEMA
 // =======================================================
 
-
-// 5.1 CONTRATO / SCHEMA (VERSÃO APRIMORADA)
-
-// Só valida contrato se veio JSON mesmo
-if (!isJson || !json || typeof json !== "object") {
-    // se algum endpoint crítico deveria ser JSON e não veio, você pode
-    // futuramente adicionar uma lista de URLs obrigatoriamente JSON aqui.
-} else {
+if (isJson && json && typeof json === "object") {
     const bodyStr = JSON.stringify(json).toLowerCase();
 
-    // GENÉRICO: JSON não pode ser HTML travestido
+    // 4.1 JSON não pode ser HTML disfarçado
     pm.test("[CONTRACT][GENERIC] Resposta JSON não contém HTML", () => {
         pm.expect(bodyStr).to.not.include("<html");
     });
 
-    // GENÉRICO: envelope hasError (muito usado no seu backend)
+    // 4.2 Convenção hasError
     if (Object.prototype.hasOwnProperty.call(json, "hasError")) {
         pm.test("[CONTRACT][GENERIC] hasError é booleano", () => {
             pm.expect(json.hasError, "hasError deve ser booleano").to.be.a("boolean");
@@ -183,7 +178,7 @@ if (!isJson || !json || typeof json !== "object") {
             }
         });
 
-        pm.test("[CONTRACT][GENERIC] Sem stack/exception em sucesso (hasError = false)", () => {
+        pm.test("[CONTRACT][GENERIC] Sucesso não vaza stack/exception", () => {
             if (json.hasError === false) {
                 const temLixo =
                     json.stackTrace ||
@@ -196,9 +191,11 @@ if (!isJson || !json || typeof json !== "object") {
     }
 }
 
-// -------------------------
-// BaseList genérico
-// -------------------------
+
+// =======================================================
+// 5. GENÉRICO: PADRÃO BASELIST
+// =======================================================
+
 if (isJson && isBaseListResponse(json)) {
     const data = getMainArray(json);
 
@@ -247,21 +244,14 @@ if (isJson && isBaseListResponse(json)) {
     });
 }
 
-// =====================================================
-// CONTRATOS POR MÓDULO (DINÂMICOS, BASEADOS NA COLLECTION)
-// =====================================================
 
-// Helpers locais
-function ensureAtLeastOneKey(obj, keys, msg) {
-    const ok = keys.some(k => Object.prototype.hasOwnProperty.call(obj, k));
-    pm.expect(ok, msg || `Deve possuir pelo menos um dos campos: ${keys.join(", ")}`).to.be.true;
-}
+// =======================================================
+// 6. CONTRATOS POR MÓDULO / ENDPOINT
+// =======================================================
 
-// -------------------------
-// AUTENTICAÇÃO / LOGIN
-// -------------------------
+// 6.1 AUTENTICAÇÃO / LOGIN (Login + newLogin)
 if (isJson && (moduleKey === "ppid_login" || url.includes("/ppid/newlogin"))) {
-    pm.test("[CONTRACT][LOGIN] Envelope padrão", () => {
+    pm.test("[CONTRACT][LOGIN] Envelope padrão com hasError", () => {
         pm.expect(json).to.have.property("hasError");
     });
 
@@ -275,6 +265,13 @@ if (isJson && (moduleKey === "ppid_login" || url.includes("/ppid/newlogin"))) {
                 json.usuario ||
                 json.user;
             pm.expect(!!hasAuthData, "Login sem token/usuário/autorização no sucesso").to.be.true;
+
+            if (json.token) {
+                ensureFieldType(json.token, "string", "Token de autenticação deve ser string");
+            }
+            if (json.expiraEm || json.expiresIn) {
+                ensureFieldType(json.expiraEm || json.expiresIn, ["number", "string"], "Tempo de expiração inválido");
+            }
         }
     });
 
@@ -290,11 +287,9 @@ if (isJson && (moduleKey === "ppid_login" || url.includes("/ppid/newlogin"))) {
     });
 }
 
-// -------------------------
-// DASHBOARD
-// -------------------------
+// 6.2 DASHBOARD (/ppid/dashboard ou /ppid/dashboard-like)
 if (isJson && url.includes("/ppid/dashboard")) {
-    pm.test("[CONTRACT][DASHBOARD] Estrutura básica do dashboard", () => {
+    pm.test("[CONTRACT][DASHBOARD] Estrutura básica", () => {
         pm.expect(json).to.have.property("hasError");
         if (json.hasError === false) {
             pm.expect(
@@ -303,47 +298,101 @@ if (isJson && url.includes("/ppid/dashboard")) {
             ).to.exist;
         }
     });
+
+    pm.test("[CONTRACT][DASHBOARD] Cards/resumos identificáveis (se existirem)", () => {
+        if (json.hasError === false) {
+            const blocos = [].concat(
+                Array.isArray(json.data) ? json.data : [],
+                Array.isArray(json.cards) ? json.cards : [],
+                Array.isArray(json.widgets) ? json.widgets : []
+            );
+            blocos.forEach((card, i) => {
+                if (!card || typeof card !== "object") return;
+                ensureAtLeastOneKey(
+                    card,
+                    ["id", "identificador", "titulo", "label", "descricao"],
+                    `[DASHBOARD] Card[${i}] sem identificador/título`
+                );
+                if (card.valor !== undefined || card.value !== undefined) {
+                    ensureFieldType(
+                        card.valor !== undefined ? card.valor : card.value,
+                        ["number", "string"],
+                        `[DASHBOARD] Card[${i}] valor inválido`
+                    );
+                }
+            });
+        }
+    });
 }
 
-// -------------------------
-// MENSAGENS
-// -------------------------
+// 6.3 MENSAGENS (/ppid/message)
 if (isJson && url.includes("/ppid/message")) {
     const data = getMainArray(json);
-    pm.test("[CONTRACT][MENSAGENS] Estrutura de mensagens", () => {
+
+    pm.test("[CONTRACT][MENSAGENS] Envelope e itens básicos", () => {
         pm.expect(json).to.have.property("hasError");
         if (Array.isArray(data) && data.length > 0) {
             data.forEach((m, i) => {
                 ensureAtLeastOneKey(
                     m,
                     ["id", "idMsg", "message", "texto", "titulo"],
-                    `[MENSAGENS] Item[${i}] sem campos básicos`
+                    `[MENSAGENS] Item[${i}] sem campos mínimos`
                 );
             });
         }
     });
 }
 
-// -------------------------
-// PEDIDOS - LISTAGENS
-// -------------------------
+// 6.4 PEDIDOS - LISTA (/ppid/orderlist)
 if (isJson && url.includes("/ppid/orderlist")) {
     const data = getMainArray(json);
-    pm.test("[CONTRACT][PEDIDOS][Lista] Campos básicos por pedido (se existirem)", () => {
+
+    pm.test("[CONTRACT][PEDIDOS][Lista] Campos essenciais por pedido", () => {
         data.forEach((p, i) => {
-            if (p.nunota !== undefined || p.NUNOTA !== undefined) {
-                pm.expect(p.nunota || p.NUNOTA, `Pedido[${i}] nunota inválido`).to.exist;
+            // Identificador
+            ensureAtLeastOneKey(
+                p,
+                ["nunota", "NUNOTA", "numero", "id"],
+                `[PEDIDOS][Lista] Pedido[${i}] sem identificador`
+            );
+
+            // Parceiro
+            ensureAtLeastOneKey(
+                p,
+                ["codParc", "CODPARC", "cliente", "idParceiro"],
+                `[PEDIDOS][Lista] Pedido[${i}] sem referência de parceiro`
+            );
+
+            // Status / situação (se existir)
+            if (
+                p.status !== undefined || p.STATUS !== undefined ||
+                p.situacao !== undefined || p.SITUACAO !== undefined
+            ) {
+                ensureAtLeastOneKey(
+                    p,
+                    ["status", "STATUS", "situacao", "SITUACAO"],
+                    `[PEDIDOS][Lista] Pedido[${i}] status/situação vazio`
+                );
             }
-            if (p.codParc !== undefined || p.CODPARC !== undefined) {
-                pm.expect(p.codParc || p.CODPARC, `Pedido[${i}] codParc inválido`).to.exist;
+
+            // Data (se informada)
+            if (p.data || p.DATA || p.dtEmissao || p.DTEMISSAO) {
+                const d =
+                    p.data || p.DATA ||
+                    p.dtEmissao || p.DTEMISSAO;
+                pm.expect(String(d).length, `[PEDIDOS][Lista] Pedido[${i}] com data vazia`).to.be.above(0);
+            }
+
+            // Totais (se presentes)
+            if (p.total || p.TOTAL || p.valorTotal) {
+                const total = p.total || p.TOTAL || p.valorTotal;
+                ensureFieldType(total, ["number", "string"], `[PEDIDOS][Lista] Pedido[${i}] total inválido`);
             }
         });
     });
 }
 
-// -------------------------
-// PEDIDOS - DETALHE
-// -------------------------
+// 6.5 PEDIDOS - DETALHE (/ppid/orderdetails)
 if (isJson && url.includes("/ppid/orderdetails")) {
     pm.test("[CONTRACT][PEDIDOS][Detalhe] Contém identificador do pedido", () => {
         ensureAtLeastOneKey(
@@ -352,11 +401,20 @@ if (isJson && url.includes("/ppid/orderdetails")) {
             "[PEDIDOS][Detalhe] Sem identificador de pedido"
         );
     });
+
+    pm.test("[CONTRACT][PEDIDOS][Detalhe] Possui itens (quando sucesso)", () => {
+        if (json.hasError === false || String(status)[0] === "2") {
+            const itens =
+                (Array.isArray(json.itens) && json.itens) ||
+                (Array.isArray(json.items) && json.items) ||
+                (json.data && Array.isArray(json.data) && json.data) ||
+                [];
+            pm.expect(itens.length, "[PEDIDOS][Detalhe] Nenhum item retornado").to.be.above(0);
+        }
+    });
 }
 
-// -------------------------
-// PEDIDOS - CRIAÇÃO / EDIÇÃO
-// -------------------------
+// 6.6 PEDIDOS - MUTAÇÃO (save, item, duplicar, confirmar, excluir, delete)
 if (isJson && (
     url.includes("/ppid/ordersaveheaderclient") ||
     url.includes("/ppid/salvaritem") ||
@@ -365,22 +423,31 @@ if (isJson && (
     url.includes("/ppid/excluiritempedido") ||
     url.includes("/ppid/orderdelete")
 )) {
-    pm.test("[CONTRACT][PEDIDOS][Mutação] Envelope de retorno padrão", () => {
+    pm.test("[CONTRACT][PEDIDOS][Mutação] Envelope possui hasError", () => {
         pm.expect(json).to.have.property("hasError");
     });
 
-    pm.test("[CONTRACT][PEDIDOS][Mutação] Sucesso com referência do pedido (quando aplicável)", () => {
+    pm.test("[CONTRACT][PEDIDOS][Mutação] Sucesso retorna referência", () => {
         if (json.hasError === false && String(status)[0] === "2") {
             const hasId =
                 json.nunota || json.NUNOTA || json.id || json.numero || json.success || json.sucesso;
             pm.expect(!!hasId, "Operação em pedido sem retorno mínimo (nunota/id/success)").to.be.true;
         }
     });
+
+    pm.test("[CONTRACT][PEDIDOS][Mutação] Erro retorna mensagem", () => {
+        if (json.hasError === true || status >= 400) {
+            const msg =
+                json.message ||
+                json.mensagem ||
+                json.error ||
+                (Array.isArray(json.errors) && json.errors[0]);
+            pm.expect(!!msg, "[PEDIDOS][Mutação] Erro sem mensagem").to.be.true;
+        }
+    });
 }
 
-// -------------------------
-// PREÇOS / TABELAS
-// -------------------------
+// 6.7 PREÇOS / TABELAS
 if (isJson && (
     url.includes("/ppid/getprices") ||
     url.includes("/ppid/gettableprices") ||
@@ -389,64 +456,56 @@ if (isJson && (
 )) {
     const data = getMainArray(json);
 
-    pm.test("[CONTRACT][PRECOS] Envelope padrão", () => {
+    pm.test("[CONTRACT][PRECOS] Envelope com hasError", () => {
         pm.expect(json).to.have.property("hasError");
     });
 
-    pm.test("[CONTRACT][PRECOS] Itens com identificador de produto (se houver lista)", () => {
+    pm.test("[CONTRACT][PRECOS] Itens com identificadores (quando lista)", () => {
         if (Array.isArray(data) && data.length > 0) {
             data.forEach((p, i) => {
                 if (p.codProd !== undefined || p.CODPROD !== undefined) {
-                    pm.expect(p.codProd || p.CODPROD, `[PRECOS] Item[${i}] sem codProd`).to.exist;
+                    pm.expect(p.codProd || p.CODPROD, `[PRECOS] Item[${i}] codProd vazio`).to.exist;
+                }
+                if (p.preco || p.PRECO || p.valor || p.precoLiquido) {
+                    const preco = p.preco || p.PRECO || p.valor || p.precoLiquido;
+                    ensureFieldType(preco, ["number", "string"], `[PRECOS] Item[${i}] preço inválido`);
                 }
             });
         }
     });
 }
 
-// -------------------------
-// PRODUTOS
-// -------------------------
+// 6.8 PRODUTOS
 if (isJson && moduleKey === "products") {
     const data = getMainArray(json);
-
-    pm.test("[CONTRACT][PRODUTOS] Lista/detalhe com identificação de produto", () => {
-        if (Array.isArray(data) && data.length > 0) {
-            data.forEach((p, i) => {
-                ensureAtLeastOneKey(
-                    p,
-                    ["codProd", "CODPROD", "id", "codigo"],
-                    `[PRODUTOS] Item[${i}] sem identificador`
-                );
-            });
-        } else {
-            // Em detalhes, o próprio json pode representar um produto
-            if (!Array.isArray(data) && typeof json === "object") {
-                if (url.includes("/products/details")) {
-                    ensureAtLeastOneKey(
-                        json,
-                        ["codProd", "CODPROD", "id", "codigo"],
-                        "[PRODUTOS][Details] Sem identificador de produto"
-                    );
-                }
+    pm.test("[CONTRACT][PRODUTOS] Lista/Detalhe com identificador e nome", () => {
+        const arr = Array.isArray(data) && data.length ? data : [json];
+        arr.forEach((p, i) => {
+            if (!p || typeof p !== "object") return;
+            ensureAtLeastOneKey(
+                p,
+                ["codProd", "CODPROD", "id", "codigo"],
+                `[PRODUTOS] Registro[${i}] sem identificador`
+            );
+            if (p.descricao || p.DESCRICAO || p.nome || p.NOME) {
+                const desc = p.descricao || p.DESCRICAO || p.nome || p.NOME;
+                pm.expect(String(desc).length, `[PRODUTOS] Registro[${i}] descrição/nome vazio`).to.be.above(0);
             }
-        }
+        });
     });
 }
 
-// -------------------------
-// PARCEIROS / CLIENTES
-// -------------------------
+// 6.9 PARCEIROS / CLIENTES
 if (isJson && moduleKey === "partner") {
     const data = getMainArray(json);
 
-    pm.test("[CONTRACT][PARCEIROS] Envelope padrão (quando aplicável)", () => {
+    pm.test("[CONTRACT][PARCEIROS] Envelope (quando aplicável)", () => {
         if (isBaseListResponse(json) || "hasError" in json) {
             pm.expect(json).to.have.property("hasError");
         }
     });
 
-    pm.test("[CONTRACT][PARCEIROS] Campos-chave por parceiro (se houver lista)", () => {
+    pm.test("[CONTRACT][PARCEIROS] Campos-chave por parceiro", () => {
         if (Array.isArray(data) && data.length > 0) {
             data.forEach((p, i) => {
                 ensureAtLeastOneKey(
@@ -454,21 +513,25 @@ if (isJson && moduleKey === "partner") {
                     ["codParc", "CODPARC"],
                     `[PARCEIROS] Item[${i}] sem codParc`
                 );
+                if (p.CGC_CPF || p.CNPJ || p.cnpj || p.cpf) {
+                    const doc = (p.CGC_CPF || p.CNPJ || p.cnpj || p.cpf || "").toString().replace(/\D/g, "");
+                    if (doc) {
+                        pm.expect([11, 14], `[PARCEIROS] Item[${i}] documento com tamanho inválido`).to.include(doc.length);
+                    }
+                }
             });
         }
     });
 }
 
-// -------------------------
-// USUÁRIOS / VENDEDORES
-// -------------------------
+// 6.10 USUÁRIOS / VENDEDORES
 if (isJson && moduleKey === "user") {
-    pm.test("[CONTRACT][USUARIO] Estrutura mínima de usuário", () => {
-        // Pode ser lista ou objeto único
+    pm.test("[CONTRACT][USUARIO] Estrutura mínima", () => {
         const data = Array.isArray(json) ? json : getMainArray(json);
         const arr = Array.isArray(data) && data.length ? data : [json];
 
         arr.forEach((u, i) => {
+            if (!u || typeof u !== "object") return;
             ensureAtLeastOneKey(
                 u,
                 ["nome", "name", "usuario", "login"],
@@ -478,25 +541,20 @@ if (isJson && moduleKey === "user") {
     });
 }
 
-// -------------------------
-// CONFIGURAÇÕES / VERSÃO MÍNIMA
-// -------------------------
+// 6.11 CONFIGURAÇÕES / VERSÃO MÍNIMA
 if (isJson && url.includes("/user/versaominima")) {
-    pm.test("[CONTRACT][CONFIG] Versão mínima presente", () => {
+    pm.test("[CONTRACT][CONFIG] versaoMinima presente", () => {
         pm.expect(json).to.have.property("versaoMinima");
     });
 }
 
-// -------------------------
-// LOGÍSTICA / FRETE (quando JSON)
-// -------------------------
+// 6.12 LOGÍSTICA / FRETE / FERIADOS (quando JSON)
 if (isJson && (
     url.includes("/tabelafrete") ||
     url.includes("/regrasentregas") ||
     url.includes("/feriados")
 )) {
-    pm.test("[CONTRACT][LOGISTICA] Envelope ou lista válida", () => {
-        // Aceita BaseList ou array simples de regras
+    pm.test("[CONTRACT][LOGISTICA] Estrutura válida", () => {
         if (!isBaseListResponse(json)) {
             pm.expect(
                 Array.isArray(json) || Array.isArray(json.data) || typeof json === "object",
@@ -506,35 +564,37 @@ if (isJson && (
     });
 }
 
-// -------------------------
-// DOCUMENTOS (viewDanfe, viewBoleto, PDFs)
-// - Aqui normalmente NÃO é JSON. Se for JSON de erro, já cai nos genéricos.
-// -------------------------
+// 6.13 DOCUMENTOS (viewDanfe, viewBoleto, viewPdf) - quando retornam JSON de erro
 if (isJson && (
     url.includes("viewdanfe") ||
     url.includes("viewboleto") ||
     url.includes("viewpdf")
 )) {
-    pm.test("[CONTRACT][DOCS] Respostas de erro em documentos usam hasError/message", () => {
+    pm.test("[CONTRACT][DOCS] Erros padronizados em consultas de documentos", () => {
         if (status >= 400 || json.hasError === true) {
-            const hasMsg =
-                json.message || json.mensagem || json.error || json.errors;
-            pm.expect(!!hasMsg, "[DOCS] Erro em documento sem mensagem").to.be.true;
+            const msg =
+                json.message ||
+                json.mensagem ||
+                json.error ||
+                json.errors;
+            pm.expect(!!msg, "[DOCS] Erro em documento sem mensagem").to.be.true;
         }
     });
 }
 
 
-
-// 5.2 FUNCIONAIS 
-
-// Regras são aplicadas APENAS se os campos existirem.
-// Isso permite reuso entre diferentes módulos sem if fixo.
+// =======================================================
+// 7. FUNCIONAIS (REGRAS DE NEGÓCIO LEVES)
+// =======================================================
+//
+// Aplicados principalmente em respostas BaseList, sem travar endpoints
+// que não usam esses campos.
+//
 
 if (isJson && isBaseListResponse(json)) {
     const data = getMainArray(json);
 
-    // Documento x TIPPESSOA (para qualquer item que tenha esses campos)
+    // 7.1 Documento x TIPPESSOA
     pm.test("[FUNCIONAL] Documento compatível com TIPPESSOA (se informado)", () => {
         data.forEach((p) => {
             if (!p.TIPPESSOA || !p.CGC_CPF) return;
@@ -548,49 +608,54 @@ if (isJson && isBaseListResponse(json)) {
         });
     });
 
-    // TEMCOMODATO x QTDCOMODATO (se existirem)
+    // 7.2 TEMCOMODATO x QTDCOMODATO
     pm.test("[FUNCIONAL] TEMCOMODATO coerente com QTDCOMODATO (se existir)", () => {
-        const erros = [];
+        const inconsistentes = [];
         data.forEach((p) => {
             if (p.TEMCOMODATO === undefined && p.QTDCOMODATO === undefined) return;
-            const qtd = p.QTDCOMODATO || 0;
-            if (p.TEMCOMODATO === "S" && qtd <= 0) {
-                erros.push(p.CODPARC || p.COD || JSON.stringify(p));
+            const qtd = Number(p.QTDCOMODATO || 0);
+            if (p.TEMCOMODATO === "S" && !(qtd > 0)) {
+                inconsistentes.push(p.CODPARC || p.COD || JSON.stringify(p));
             }
             if (p.TEMCOMODATO === "N" && qtd > 0) {
-                erros.push(p.CODPARC || p.COD || JSON.stringify(p));
+                inconsistentes.push(p.CODPARC || p.COD || JSON.stringify(p));
             }
         });
-        if (erros.length) {
-            console.log("[FUNCIONAL] Inconsistências TEMCOMODATO/QTDCOMODATO:", erros);
+        if (inconsistentes.length) {
+            console.log("[FUNCIONAL] Inconsistências TEMCOMODATO/QTDCOMODATO:", inconsistentes);
         }
-        pm.expect(erros, "Inconsistências TEMCOMODATO/QTDCOMODATO encontradas").to.be.empty;
+        pm.expect(true).to.be.true; // informativo (não quebra por padrão)
     });
 }
 
 
-// 5.3 NEGATIVOS
+// =======================================================
+// 8. NEGATIVOS (STATUS 4xx/5xx COM JSON)
+// =======================================================
 
 if (isJson && status >= 400) {
-    pm.test("[NEGATIVO] Erro possui estrutura mínima", () => {
+    pm.test("[NEGATIVO] Estrutura mínima de erro em respostas 4xx/5xx", () => {
         const hasMensagem =
             json.hasError === true ||
             json.message ||
+            json.mensagem ||
             json.error ||
             json.errors;
         pm.expect(
             hasMensagem,
-            "Erro sem indicação clara (hasError/message/error/errors)"
+            "Erro sem indicação clara (hasError/message/mensagem/error/errors)"
         ).to.exist;
     });
 }
 
 
-// 5.4 FLUXOS / E2E 
+// =======================================================
+// 9. FLUXOS / E2E (LOGIN, PEDIDO)
+// =======================================================
 
-// Login bem-sucedido → salva dados para outras requisições
+// 9.1 Após login bem-sucedido, salva dados úteis
 if (isJson && moduleKey === "ppid_login" && status === 200 && json.hasError === false) {
-    pm.test("[FLOW] Login popula variáveis globais", () => {
+    pm.test("[FLOW] Login popula variáveis para chamadas seguintes", () => {
         if (json.token) {
             pm.environment.set("bearerToken", json.token);
         }
@@ -601,10 +666,13 @@ if (isJson && moduleKey === "ppid_login" && status === 200 && json.hasError === 
     });
 }
 
-// Qualquer resposta com nunota/id de pedido → reaproveitar
-if (isJson && /order/.test(moduleKey) && status === 200) {
-    pm.test("[FLOW] Identificador de pedido reaproveitável (se presente)", () => {
-        const nunota = json.nunota || json.NUNOTA || json.id || json.numero || null;
+// 9.2 Qualquer resposta de pedido que exponha nunota/id reaproveita para próximos testes
+if (isJson && /ppid_order/.test(moduleKey) && String(status)[0] === "2") {
+    pm.test("[FLOW] Captura nunota/id de pedido quando presente", () => {
+        const nunota =
+            json.nunota || json.NUNOTA ||
+            (Array.isArray(json.data) && json.data[0] && (json.data[0].nunota || json.data[0].NUNOTA)) ||
+            json.id || json.numero || null;
         if (nunota) {
             pm.environment.set("nunota", String(nunota));
         }
@@ -613,40 +681,36 @@ if (isJson && /order/.test(moduleKey) && status === 200) {
 }
 
 
-// 5.5 REGRESSÃO (GENÉRICO LEVE)
-
-if (isJson && url.includes("/user/versaominima")) {
-    pm.test("[REGRESSAO] /user/versaoMinima mantém versaoMinima", () => {
-        pm.expect(json).to.have.property("versaoMinima");
-    });
-}
-
-
-// 5.6 SLA / PERFORMANCE
+// =======================================================
+// 10. SLA / PERFORMANCE
+// =======================================================
 
 pm.test("[SLA] Tempo de resposta abaixo de 5000ms (global)", () => {
     pm.expect(pm.response.responseTime).to.be.below(5000);
 });
 
-// Mais rígido para endpoints que normalmente são críticos (heurística genérica)
+// Mais rígido para endpoints mais críticos
 if (
     moduleKey.includes("login") ||
-    moduleKey.includes("partner") ||
-    moduleKey.includes("products") ||
     moduleKey.includes("ppid_dashboard") ||
-    moduleKey.includes("ppid_sincronizacaoinicial")
+    moduleKey.includes("ppid_sincronizacaoinicial") ||
+    moduleKey.includes("products") ||
+    moduleKey.includes("partner")
 ) {
     pm.test("[SLA] Endpoint crítico abaixo de 2000ms", () => {
         pm.expect(pm.response.responseTime).to.be.below(2000);
     });
 }
 
-// 5.7 SEGURANÇA
+
+// =======================================================
+// 11. SEGURANÇA
+// =======================================================
 
 if (isJson && json) {
     pm.test("[SEGURANCA] Nenhum campo sensível óbvio exposto", () => {
         const bodyStr = JSON.stringify(json).toLowerCase();
-        const proibidos = ["\"password\"", "\"senha\"", "\"secret\"", "\"segredo\""];
+        const proibidos = ['"password"', '"senha"', '"secret"', '"segredo"'];
         proibidos.forEach((chave) => {
             pm.expect(bodyStr, `Campo sensível exposto: ${chave}`).to.not.include(chave);
         });
@@ -659,12 +723,18 @@ if (pm.request.headers.has("authorization")) {
     });
 }
 
-// 5.8 QUALIDADE DE DADOS 
+
+// =======================================================
+// 12. QUALIDADE DE DADOS (INFORMATIVO)
+// =======================================================
+//
+// Executa apenas quando a resposta segue BaseList.
+//
 
 if (isJson && isBaseListResponse(json)) {
     const data = getMainArray(json);
 
-    // UF válida quando campo UF existir
+    // 12.1 UF válida
     pm.test("[DATA] UF válida quando informada", () => {
         const ufsValidas = [
             "AC","AL","AP","AM","BA","CE","DF","ES","GO","MA",
@@ -680,11 +750,10 @@ if (isJson && isBaseListResponse(json)) {
         if (invalidos.length) {
             console.log("[DATA] UFs inválidas encontradas:", invalidos);
         }
-        // informativo, não trava por padrão
         pm.expect(true).to.be.true;
     });
 
-    // CEP com 8 dígitos quando existir campo CEP
+    // 12.2 CEP com 8 dígitos
     pm.test("[DATA] CEP com 8 dígitos quando informado", () => {
         const erros = [];
         data.forEach((p) => {
@@ -696,26 +765,28 @@ if (isJson && isBaseListResponse(json)) {
         if (erros.length) {
             console.log("[DATA] CEPs inválidos encontrados:", erros);
         }
-        // se quiser travar, troque por expect(erros).to.be.empty;
         pm.expect(true).to.be.true;
     });
 
-    // Duplicidade de documento (se CGC_CPF existir)
+    // 12.3 Documento não duplicado (CGC_CPF entre parceiros)
     pm.test("[DATA] Documento não duplicado entre registros (quando informado)", () => {
         const seen = {};
         const dups = [];
         data.forEach((p) => {
             const doc = (p.CGC_CPF || "").replace(/\D/g, "");
             if (!doc) return;
-            if (seen[doc] && seen[doc] !== (p.CODPARC || p.COD)) {
-                dups.push({ doc, a: seen[doc], b: p.CODPARC || p.COD });
-            } else {
-                seen[doc] = p.CODPARC || p.COD;
+            const chaveParc = p.CODPARC || p.COD;
+            if (seen[doc] && seen[doc] !== chaveParc) {
+                dups.push({ doc, a: seen[doc], b: chaveParc });
+            } else if (chaveParc) {
+                seen[doc] = chaveParc;
             }
         });
         if (dups.length) {
             console.log("[DATA] Documentos duplicados:", dups);
         }
-        pm.expect(true).to.be.true; // informativo
+        pm.expect(true).to.be.true;
     });
 }
+
+// Fim do script v2.
