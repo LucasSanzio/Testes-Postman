@@ -285,8 +285,5 @@ Para BaseList:
 
 ## Importante
 
-- O script v2 **aprimora** a versão anterior, não a descarta.
 - Toda lógica foi pensada para funcionar em cima do seu cenário real
   definido na collection `Backend - Vidya Force`.
-- Caso algum endpoint tenha comportamento muito diferente em produção,
-  você pode ajustar pontualmente as regras mantendo a mesma estrutura.
