@@ -1,4 +1,4 @@
-# Backend Vidya Force - Testes Globais (v2)
+# Backend Vidya Force - Testes Globais (v3 — consolidado v2 + add-on v3)
 
 Este repositório contém o script **global** de testes automatizados para ser utilizado na collection:
 
@@ -11,6 +11,33 @@ A versão **v2** mantém toda a lógica da versão anterior, porém:
 - Mantém o conceito de **Smoke por módulo com gate** usando `skip_<modulo>`.
 - Não aborta mais a execução completa da collection em caso de erro — falhas afetam apenas o request/módulo.
 - Garante compatibilidade com a estrutura atual da sua collection e padrões de resposta (`hasError`, `BaseList`, etc.).
+
+## Novidades da Versão 3 (add-on integrado ao v2)
+
+> Esta versão **não substitui** o seu script v2 — ela o **complementa**. O README foi **mesclado**: todas as instruções do v2 permanecem válidas e, abaixo, estão os reforços que agora fazem parte da suíte **final**.
+
+- **Pre-request global automático**: injeta `accessData` (se definido em Environment/Collection) e garante `Authorization: Basic {{auth_token}}` gerado a partir de `username` + `password`.
+- **Validação de BINÁRIOS**: checks de **PDF/DANFE/BOLETO** e **imagens** (MIME correto e tamanho mínimo) para evitar aceitar HTML de erro como arquivo válido.
+- **Paginação consistente**: evita **itens repetidos entre páginas** e confere coerência de `page` (ex.: `/ppid/getPrices?page=N`).
+- **Invariantes cross-endpoints**:
+  - `/partner/save` ⇒ o parceiro precisa aparecer em `/partner/list`.
+  - `/ppid/{nunota}/saveAttachment` ⇒ deve refletir em `/ppid/{nunota}/listAttachment`.
+  - `/user/{id}/changePhoto` ⇒ precisa refletir em `/user/{id}/imagem` (MIME/tamanho).
+- **Idempotência nas mutações**: repetir operações críticas gera **erro controlado** (ex.: `confirmarPedido` 2x, `excluirItemPedido` 2x).
+- **Negativos padronizados pelo nome**: sufixos no **nome do request** como `[NEGATIVO]`, `[SEM AUTH]`, `[SEM ACCESSDATA]`, `[ID INEXISTENTE]` disparam expectativas de **400/401/403/404** e exigem **mensagem clara** no JSON de erro.
+- **Hardening de segurança**: previne vazamento de campos sensíveis (`password`, `senha`, `secret`, etc.).
+- **Reset real de flags**: o request **“00 – [RESET FLAGS]”** agora limpa variáveis `skip_*` e caches auxiliares (ex.: `v3_seen_ids::getprices`).
+
+### Como usar a suíte final (v2 + v3)
+1. **Collection ▸ Pre-request Script**: mantenha o bloco que injeta `Authorization` e `accessData` automaticamente.
+2. **Collection ▸ Tests**: deixe o **Add-on v3 colado abaixo do v2** (os dois permanecem ativos).
+3. **Request “00 – [RESET FLAGS]” ▸ Tests**: use o script de reset **compatível** (remove `skip_*` e caches).
+4. Crie **clones negativos** dos requests com sufixos no **nome** para ativar asserções negativas automáticas.
+5. Rode a suíte (Runner/Newman). Para uma execução limpa, inicie por “00 – [RESET FLAGS]”.
+
+### Notas rápidas
+- O add-on v3 **não altera** o comportamento do v2; ele só adiciona novas asserções e fluxos de verificação.
+- Se o seu design aceitar “confirmar/excluir” múltiplas vezes **como sucesso**, comente os blocos de idempotência.
 
 ## Como usar
 
@@ -282,8 +309,3 @@ Para BaseList:
   - Detecção de possíveis documentos duplicados (`CGC_CPF`).
 
 ---
-
-## Importante
-
-- Toda lógica foi pensada para funcionar em cima do seu cenário real
-  definido na collection `Backend - Vidya Force`.
