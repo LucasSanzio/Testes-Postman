@@ -1174,128 +1174,163 @@ if (isJson && isBaseListResponse(json)) {
 
 
 // =====================================================
-//  Vidya Force — Collection ▸ Tests  (Patch V3.2)
-//  Escopo: incrementos seguros sobre v2 + v3 existentes
-//  Observação: os blocos são auto-contidos e tolerantes.
+//  Vidya Force — Collection ▸ Tests  (Patch V3.2.1)
+//  Incrementos sobre v2+v3: reset-once + testes estáveis
+//  Observação: não remove asserts existentes do v2/v3.
 // =====================================================
 
 // ===============================
-// [V3.2] Binários reforçados
+// [V3.2.1] Bootstrap — reset-once por rodada
+// Limpa resíduos que reduzem a contagem de testes entre runs,
+// sem apagar credenciais/baseUrl. Executa apenas uma vez no run.
 // ===============================
-(function binaryReinforce(){
+(function v311_bootstrap(){
   try {
-    var ct = (pm.response.headers.get('Content-Type') || '').toLowerCase();
-    if (!ct || ct.includes('application/json')) return; // já coberto noutros testes ou não-binário
+    if (pm.collectionVariables.get('v311_bootstrap_done')) return;
 
-    // Helper para obter tamanho do corpo de forma robusta
-    var size = 0;
-    try {
-      var sz = pm.response.size && pm.response.size();
-      if (sz && typeof sz.body === 'number') size = sz.body;
-    } catch (e1) {}
-    if (!size && typeof pm.response.responseSize === 'number') size = pm.response.responseSize;
+    // Gera run_id único para dados idempotentes
+    var runId = Date.now().toString(36) + '-' + (Math.random().toString(36).slice(2,8));
+    pm.collectionVariables.set('run_id', runId);
 
-    // PDF: assinatura + tamanho mínimo
-    if (ct.includes('application/pdf')) {
-      pm.test('[BIN] PDF válido (assinatura %PDF- + tamanho)', function () {
-        var head = '';
-        try { head = (pm.response.text() || '').slice(0, 5); } catch(e2){}
-        pm.expect(head && head.startsWith('%PDF-'), 'PDF sem assinatura %PDF-').to.be.true;
-        pm.expect(size, 'PDF muito pequeno').to.be.above(1024);
+    // Limpa prefixes de variáveis de teste (mas preserva credenciais e config)
+    var scopes = [pm.collectionVariables, pm.environment, pm.globals];
+    var patterns = [
+      /^skip_/i,
+      /^v3_/i,                // v3_seen_ids::..., v3_seen_pages::..., v3_* caches auxiliares
+      /^seen_/i,
+      /^idempotency_/i,
+      /^page(_|-)?state/i,
+      /^run_/i,
+      /^tmp_/i,
+      /^last_/i
+    ];
+
+    scopes.forEach(function(scope){
+      var obj = {};
+      try { obj = scope && scope.toObject ? (scope.toObject() || {}) : {}; } catch(e){}
+      Object.keys(obj).forEach(function(k){
+        if (patterns.some(function(rx){ return rx.test(k); })) {
+          try { scope.unset(k); } catch(e){}
+        }
       });
-    }
+    });
 
-    // Imagens: MIME suportado + tamanho mínimo
-    if (/image\/(png|jpe?g|webp)/.test(ct)) {
-      pm.test('[BIN] Imagem com MIME e tamanho mínimo', function () {
-        pm.expect(size, 'Imagem muito pequena').to.be.above(512);
-      });
-    }
-  } catch (e) { /* silencioso */ }
+    pm.collectionVariables.set('v311_bootstrap_done', '1');
+    console.info('[V3.1.1] bootstrap: limpeza leve aplicada; run_id=', runId);
+  } catch(e) { /* silencioso */ }
 })();
 
 // ===============================
-// [V3.2] Paginação extrema (page out of range) + coerência
+// [V3.2.1] Binários — testes sempre-registrados (aplicam só quando 2xx não-JSON)
+// Mantém contagem estável de testes entre runs.
 // ===============================
-(function paginationEdges(){
+(function v311_stableBinary(){
+  try {
+    var code = pm.response.code || 0;
+    var is2xx = code >= 200 && code < 300;
+    var ct = (pm.response.headers.get('Content-Type') || '').toLowerCase();
+    var isJson = ct.includes('application/json');
+
+    // Helper de tamanho robusto
+    function bodySize(){
+      try { var s = pm.response.size && pm.response.size(); if (s && typeof s.body === 'number') return s.body; } catch(_){}
+      return (typeof pm.response.responseSize === 'number') ? pm.response.responseSize : 0;
+    }
+
+    pm.test('[BIN] PDF válido (assinatura %PDF- + tamanho)', function(){
+      var ok = is2xx && !isJson && ct.includes('application/pdf');
+      if (!ok) return pm.expect(true, 'N/A').to.be.true;
+      var head = '';
+      try { head = (pm.response.text() || '').slice(0,5); } catch(_){}
+      pm.expect(head.startsWith('%PDF-'), 'PDF sem assinatura %PDF-').to.be.true;
+      pm.expect(bodySize(), 'PDF muito pequeno').to.be.above(1024);
+    });
+
+    pm.test('[BIN] Imagem com MIME e tamanho mínimo', function(){
+      var ok = is2xx && !isJson && /image\/(png|jpe?g|webp)/.test(ct);
+      if (!ok) return pm.expect(true, 'N/A').to.be.true;
+      pm.expect(bodySize(), 'Imagem muito pequena').to.be.above(512);
+    });
+  } catch(e) { /* silencioso */ }
+})();
+
+// ===============================
+// [V3.2.1] Paginação — teste sempre existe; aplica quando há page na query/JSON
+// ===============================
+(function v311_stablePagination(){
   try {
     var url = pm.request.url.toString();
-    if (!/[?&]page=\d+/.test(url)) return; // só para rotas com paginação por query
-
-    pm.test('[PAG] Coerência entre query.page e body.page (quando houver)', function () {
-      try {
-        var j = pm.response.json();
-        if (j && (j.page !== undefined || j.pagina !== undefined)) {
-          var bodyPage = (j.page !== undefined) ? Number(j.page) : Number(j.pagina);
-          var qPageMatch = url.match(/(?:\?|&)page=(\d+)/);
-          var qPage = qPageMatch ? Number(qPageMatch[1]) : NaN;
-          if (!Number.isNaN(qPage)) pm.expect(bodyPage).to.eql(qPage);
-        }
-      } catch(_) { /* tolera não-JSON */ }
+    var qMatch = url.match(/(?:\?|&)page=(\d+)/i);
+    var ct = (pm.response.headers.get('Content-Type') || '').toLowerCase();
+    pm.test('[PAG] Coerência query.page vs body.page (quando disponível)', function(){
+      if (!qMatch || !ct.includes('application/json')) {
+        return pm.expect(true, 'N/A').to.be.true;
+      }
+      var qPage = Number(qMatch[1]);
+      var j = pm.response.json();
+      var bodyPage = (j && (j.page !== undefined ? j.page : j.pagina));
+      if (bodyPage !== undefined) pm.expect(Number(bodyPage)).to.eql(Number(qPage));
+      else pm.expect(true, 'Body.page ausente (tolerado)').to.be.true;
     });
-  } catch (e) { /* silencioso */ }
+  } catch(e) { /* silencioso */ }
 })();
 
 // ===============================
-// [V3.2] Headers por domínio (/ppid/ exige accessData)
+// [V3.2.1] Headers por domínio — /ppid/ exige accessData
 // ===============================
-(function domainHeaders(){
+(function v311_domainHeaders(){
   try {
     var u = pm.request.url.toString().toLowerCase();
-    if (u.includes('/ppid/')) {
-      pm.test('[HEADERS] accessData presente e não-vazio para /ppid/', function () {
-        var hv = pm.request.headers.get('accessData');
-        pm.expect(!!hv, 'accessData ausente/vazio').to.be.true;
-      });
-    }
-  } catch (e) { /* silencioso */ }
+    pm.test('[HEADERS] /ppid/ exige accessData não-vazio', function(){
+      if (u.indexOf('/ppid/') === -1) return pm.expect(true, 'N/A').to.be.true;
+      var hv = pm.request.headers.get('accessData');
+      pm.expect(!!hv, 'accessData ausente/vazio').to.be.true;
+    });
+  } catch(e) { /* silencioso */ }
 })();
 
 // ===============================
-// [V3.2] SLA leve para operações críticas
+// [V3.2.1] SLA leve — operações críticas
 // ===============================
-(function slaSoft(){
+(function v311_sla(){
   try {
-    var crit = [/\/ppid\/.+\/view(pdf|danfe|boleto)/i, /\/partner\/save/i];
     var url = pm.request.url.toString();
-    if (!crit.some(function (r){ return r.test(url); })) return;
-
-    pm.test('[SLA] Resposta crítica em < 3000ms', function () {
+    var crit = [/\/ppid\/.+\/view(pdf|danfe|boleto)/i, /\/partner\/save/i];
+    pm.test('[SLA] Operação crítica < 3000ms (se aplicável)', function(){
+      if (!crit.some(function(r){ return r.test(url); })) return pm.expect(true, 'N/A').to.be.true;
       var t = pm.response.responseTime;
       pm.expect(t, 'SLA alto: ' + t + 'ms').to.be.below(3000);
     });
-  } catch (e) { /* silencioso */ }
+  } catch(e) { /* silencioso */ }
 })();
 
 // ===============================
-// [V3.2] Negativos padronizados (guarda genérica)
+// [V3.2.1] Negativos — guarda genérica, sempre registrada
 // ===============================
-(function negativesGuard(){
+(function v311_negativesGuard(){
   try {
     var name = (pm.info.requestName || '').toLowerCase();
     var isNeg = /\[(negativo|4xx|5xx|sem auth|sem accessdata|id inexistente|page out of range)\]/i.test(name);
-    if (!isNeg) return;
-
-    // Espera 4xx
-    pm.test('[NEG] HTTP 4xx esperado', function () {
+    pm.test('[NEG] Respostas negativas retornam 4xx (se marcado por sufixo)', function(){
+      if (!isNeg) return pm.expect(true, 'N/A').to.be.true;
       pm.expect(pm.response.code, 'Era esperado 4xx').to.be.within(400, 499);
     });
 
-    // Quando JSON, garantir mensagem clara
     var ct = (pm.response.headers.get('Content-Type') || '').toLowerCase();
-    if (ct.includes('application/json')) {
-      pm.test('[NEG] Erro JSON possui mensagem', function () {
-        var j = pm.response.json();
-        var m = j && (j.message || j.mensagem || j.error || j.errors);
-        pm.expect(!!m, 'Erro sem mensagem clara').to.be.true;
-      });
-    }
-  } catch (e) { /* silencioso */ }
+    pm.test('[NEG] Erro JSON possui mensagem (se aplicável)', function(){
+      if (!isNeg || !ct.includes('application/json')) return pm.expect(true, 'N/A').to.be.true;
+      var j = pm.response.json();
+      var m = j && (j.message || j.mensagem || j.error || j.errors);
+      pm.expect(!!m, 'Erro sem mensagem clara').to.be.true;
+    });
+  } catch(e) { /* silencioso */ }
 })();
 
 // ===============================
-// [V3.2] Notas
-// - Os blocos acima são incrementais e não removem asserts existentes.
-// - Foram escritos para "não atrapalhar" v2/v3: se o cenário não se aplica, eles simplesmente retornam.
+// [V3.2.1] Notas
+// - Estes blocos são incrementais. Se a suíte já tinha testes equivalentes,
+//   a contagem permanecerá estável porque os guards produzem "N/A" ao invés de não registrar testes.
+// - O bootstrap não remove credenciais/config (baseUrl, username, password, accessData).
+// - Para máxima previsibilidade, execute sempre um request "00 – [RESET]" no início do Runner.
 // ===============================
 
