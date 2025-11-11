@@ -45,6 +45,15 @@ A versão **v2** mantém toda a lógica da versão anterior, porém:
 - **Negativos padronizados:** sufixos como `[SEM AUTH]`, `[SEM ACCESSDATA]`, `[ID INEXISTENTE]`, `[PAGE OUT OF RANGE]` ganham asserts específicos (4xx + mensagem clara).
 - **Multi-cliente simples:** variável `ENV_CHOICE` seleciona `baseUrl_*` (DEV/HML/PRD) sem editar requests.
 
+
+### Refinamentos aplicados (v3.2.1)
+
+- **Bootstrap reset-once:** limpeza leve e automática de resíduos entre rodadas (`skip_*`, `v3_*`, `seen_*`, `idempotency_*`, `page_state*`, `run_*`, `tmp_`, `last_*`) preservando credenciais e configuração. Gera `run_id` único por execução para estabilizar testes de idempotência.
+- **Testes sempre-registrados:** binários, paginação, headers `/ppid/`, SLA e negativos passam a registrar `pm.test` em todos os casos, marcando **“N/A”** quando o cenário não se aplica. Isso mantém a **contagem de testes estável** entre a 1ª e a 2ª bateria.
+- **Paginação coerente:** comparação explícita `query.page == body.page` quando disponível, sem alterar coberturas já existentes. 
+- **Boas práticas de Runner:** recomenda-se executar com **Persist variables = OFF** e iniciar pela requisição **“00 – [RESET FLAGS]”**; o bootstrap ajuda mesmo quando alguém esquece o reset.
+- **Compatibilidade total:** tudo é incremental; V2/V3 permanecem ativos e inalterados. Se a suíte já cobria algum ponto, o novo guard apenas retorna “N/A” (não aumenta falsos negativos).
+
 ### Como usar a suíte final (v2 + v3)
 1. **Collection ▸ Pre-request Script**: mantenha o bloco que injeta `Authorization` e `accessData` automaticamente.
 2. **Collection ▸ Tests**: deixe o **Add-on v3 colado abaixo do v2** (os dois permanecem ativos).
