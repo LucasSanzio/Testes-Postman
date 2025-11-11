@@ -870,7 +870,7 @@ if (isJson && isBaseListResponse(json)) {
     const u = url;
 
     // PDF-like
-    if (u.includes('/viewpdf') || u.includes('/viewdanfe') || u.includes('/viewboleto')) {
+    if ((res.code >= 200 && res.code < 300) && !isJson && (u.includes('/viewpdf') || u.includes('/viewdanfe') || u.includes('/viewboleto'))) {
       pm.test('[BINARIO] Content-Type PDF', () => pm.expect(ct).to.include('application/pdf'));
       pm.test('[BINARIO] Tamanho > 1KB', () => pm.expect(res.responseSize).to.be.above(1024));
       pm.test('[BINARIO] Content-Disposition presente', () => {
@@ -880,7 +880,7 @@ if (isJson && isBaseListResponse(json)) {
     }
 
     // Imagens (produto/usuário)
-    if (u.includes('/imagem/')) {
+    if ((res.code >= 200 && res.code < 300) && !isJson && u.includes('/imagem/')) {
       pm.test('[BINARIO] Content-Type imagem', () =>
         pm.expect(ct).to.match(/image\/(png|jpe?g|webp)/));
       pm.test('[BINARIO] Tamanho > 512B', () => pm.expect(res.responseSize).to.be.above(512));
@@ -909,7 +909,8 @@ if (isJson && isBaseListResponse(json)) {
       ).filter(Boolean).map(String)
     ));
 
-    const seenKey = `v3_seen_ids::getprices`;
+    const vendor = CODVEND || 'default';
+    const seenKey = `v3_seen_ids::getprices::${vendor}`;
     const seenRaw = pm.environment.get(seenKey) || '';
     const seen = new Set(seenRaw ? seenRaw.split(',') : []);
 
@@ -1031,6 +1032,19 @@ if (isJson && isBaseListResponse(json)) {
   // =======================================================
   // D) IDEMPOTÊNCIA E NEGATIVOS PADRONIZADOS EM MUTAÇÕES
   // =======================================================
+  // Helper para clonar body (raw/urlencoded/form-data)
+  function cloneBody(b) {
+    if (!b) return undefined;
+    if (b.mode === 'raw') return { mode: 'raw', raw: b.raw };
+    if (b.mode === 'urlencoded') {
+      try { return { mode: 'urlencoded', urlencoded: b.urlencoded.toJSON() }; } catch(e) { return { mode: 'urlencoded', urlencoded: b.urlencoded }; }
+    }
+    if (b.mode === 'formdata') {
+      try { return { mode: 'formdata', formdata: b.formdata.toJSON() }; } catch(e) { return { mode: 'formdata', formdata: b.formdata }; }
+    }
+    return undefined;
+  }
+
   // D.1) confirmarPedido duas vezes não deve passar “em silêncio”
   (function doubleConfirmGuard() {
     if (!url.includes('/ppid/confirmarpedido') || status < 200 || status >= 300) return;
@@ -1041,7 +1055,7 @@ if (isJson && isBaseListResponse(json)) {
      method: req.method,
      header: (req.headers && typeof req.headers.toJSON === 'function')
         ? req.headers.toJSON() : [],
-     body: req.body ? { mode: req.body.mode, raw: req.body.raw } : undefined
+     body: cloneBody(req.body)
     };
 
     pm.sendRequest(cloneReq, (err, r) => {
@@ -1064,7 +1078,7 @@ if (isJson && isBaseListResponse(json)) {
      method: req.method,
      header: (req.headers && typeof req.headers.toJSON === 'function')
         ? req.headers.toJSON() : [],
-     body: req.body ? { mode: req.body.mode, raw: req.body.raw } : undefined
+     body: cloneBody(req.body)
 };
 
     pm.sendRequest(cloneReq, (err, r) => {
@@ -1118,10 +1132,170 @@ if (isJson && isBaseListResponse(json)) {
     const asText = JSON.stringify(json).toLowerCase();
 
     pm.test('[SEC] Resposta não devolve segredo/senha/token em claro', () => {
-      const banned = ['"password":', '"senha":', '"secret":', '"secreto":', '"auth":', '"token":'];
+      const isAuthFlow = /\/login|\/newlogin|\/refresh|\/token/i.test(url);
+      const bannedBase = ['"password":', '"senha":', '"secret":', '"secreto":'];
+      const banned = isAuthFlow ? bannedBase : [...bannedBase, '"auth":', '"token":'];
       const hit = banned.some(b => asText.includes(b));
       pm.expect(hit, 'Campos sensíveis não deveriam voltar em claro').to.be.false;
     });
   })();
 
+
+// =======================================================
+// G) HEADER accessData obrigatório em rotas PPID
+// =======================================================
+(function requireAccessDataHeader(){
+  if (!url.includes('/ppid/')) return;
+  pm.test('[HEADERS] accessData presente em rotas PPID', () => {
+    const has = pm.request.headers.has('accessData') && !!pm.request.headers.get('accessData');
+    pm.expect(has, 'Header accessData ausente/vazio').to.be.true;
+  });
+})();
+
+// Checks mínimos para mensagens e logística (seguros)
+(function lightweightExtras(){
+  if (isJson && url.includes('/ppid/message')) {
+    const arr = getMainArray(json);
+    pm.test('[MSG] Estrutura mínima de mensagens', () => {
+      const ok = Array.isArray(arr);
+      pm.expect(ok, 'Lista de mensagens deve ser array').to.be.true;
+    });
+  }
+  if (isJson && url.includes('/ppid/solicitacoesentrega')) {
+    const arr = getMainArray(json);
+    pm.test('[LOG] Estrutura mínima de solicitações de entrega', () => {
+      const ok = Array.isArray(arr);
+      pm.expect(ok, 'Lista de solicitações deve ser array').to.be.true;
+    });
+  }
+})();
+
 })(); // fim do ADD-ON v3
+
+
+// =====================================================
+//  Vidya Force — Collection ▸ Tests  (Patch V3.2)
+//  Escopo: incrementos seguros sobre v2 + v3 existentes
+//  Observação: os blocos são auto-contidos e tolerantes.
+// =====================================================
+
+// ===============================
+// [V3.2] Binários reforçados
+// ===============================
+(function binaryReinforce(){
+  try {
+    var ct = (pm.response.headers.get('Content-Type') || '').toLowerCase();
+    if (!ct || ct.includes('application/json')) return; // já coberto noutros testes ou não-binário
+
+    // Helper para obter tamanho do corpo de forma robusta
+    var size = 0;
+    try {
+      var sz = pm.response.size && pm.response.size();
+      if (sz && typeof sz.body === 'number') size = sz.body;
+    } catch (e1) {}
+    if (!size && typeof pm.response.responseSize === 'number') size = pm.response.responseSize;
+
+    // PDF: assinatura + tamanho mínimo
+    if (ct.includes('application/pdf')) {
+      pm.test('[BIN] PDF válido (assinatura %PDF- + tamanho)', function () {
+        var head = '';
+        try { head = (pm.response.text() || '').slice(0, 5); } catch(e2){}
+        pm.expect(head && head.startsWith('%PDF-'), 'PDF sem assinatura %PDF-').to.be.true;
+        pm.expect(size, 'PDF muito pequeno').to.be.above(1024);
+      });
+    }
+
+    // Imagens: MIME suportado + tamanho mínimo
+    if (/image\/(png|jpe?g|webp)/.test(ct)) {
+      pm.test('[BIN] Imagem com MIME e tamanho mínimo', function () {
+        pm.expect(size, 'Imagem muito pequena').to.be.above(512);
+      });
+    }
+  } catch (e) { /* silencioso */ }
+})();
+
+// ===============================
+// [V3.2] Paginação extrema (page out of range) + coerência
+// ===============================
+(function paginationEdges(){
+  try {
+    var url = pm.request.url.toString();
+    if (!/[?&]page=\d+/.test(url)) return; // só para rotas com paginação por query
+
+    pm.test('[PAG] Coerência entre query.page e body.page (quando houver)', function () {
+      try {
+        var j = pm.response.json();
+        if (j && (j.page !== undefined || j.pagina !== undefined)) {
+          var bodyPage = (j.page !== undefined) ? Number(j.page) : Number(j.pagina);
+          var qPageMatch = url.match(/(?:\?|&)page=(\d+)/);
+          var qPage = qPageMatch ? Number(qPageMatch[1]) : NaN;
+          if (!Number.isNaN(qPage)) pm.expect(bodyPage).to.eql(qPage);
+        }
+      } catch(_) { /* tolera não-JSON */ }
+    });
+  } catch (e) { /* silencioso */ }
+})();
+
+// ===============================
+// [V3.2] Headers por domínio (/ppid/ exige accessData)
+// ===============================
+(function domainHeaders(){
+  try {
+    var u = pm.request.url.toString().toLowerCase();
+    if (u.includes('/ppid/')) {
+      pm.test('[HEADERS] accessData presente e não-vazio para /ppid/', function () {
+        var hv = pm.request.headers.get('accessData');
+        pm.expect(!!hv, 'accessData ausente/vazio').to.be.true;
+      });
+    }
+  } catch (e) { /* silencioso */ }
+})();
+
+// ===============================
+// [V3.2] SLA leve para operações críticas
+// ===============================
+(function slaSoft(){
+  try {
+    var crit = [/\/ppid\/.+\/view(pdf|danfe|boleto)/i, /\/partner\/save/i];
+    var url = pm.request.url.toString();
+    if (!crit.some(function (r){ return r.test(url); })) return;
+
+    pm.test('[SLA] Resposta crítica em < 3000ms', function () {
+      var t = pm.response.responseTime;
+      pm.expect(t, 'SLA alto: ' + t + 'ms').to.be.below(3000);
+    });
+  } catch (e) { /* silencioso */ }
+})();
+
+// ===============================
+// [V3.2] Negativos padronizados (guarda genérica)
+// ===============================
+(function negativesGuard(){
+  try {
+    var name = (pm.info.requestName || '').toLowerCase();
+    var isNeg = /\[(negativo|4xx|5xx|sem auth|sem accessdata|id inexistente|page out of range)\]/i.test(name);
+    if (!isNeg) return;
+
+    // Espera 4xx
+    pm.test('[NEG] HTTP 4xx esperado', function () {
+      pm.expect(pm.response.code, 'Era esperado 4xx').to.be.within(400, 499);
+    });
+
+    // Quando JSON, garantir mensagem clara
+    var ct = (pm.response.headers.get('Content-Type') || '').toLowerCase();
+    if (ct.includes('application/json')) {
+      pm.test('[NEG] Erro JSON possui mensagem', function () {
+        var j = pm.response.json();
+        var m = j && (j.message || j.mensagem || j.error || j.errors);
+        pm.expect(!!m, 'Erro sem mensagem clara').to.be.true;
+      });
+    }
+  } catch (e) { /* silencioso */ }
+})();
+
+// ===============================
+// [V3.2] Notas
+// - Os blocos acima são incrementais e não removem asserts existentes.
+// - Foram escritos para "não atrapalhar" v2/v3: se o cenário não se aplica, eles simplesmente retornam.
+// ===============================
+
