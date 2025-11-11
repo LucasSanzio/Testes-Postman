@@ -1,4 +1,4 @@
-# Backend Vidya Force - Testes Globais (v3 — consolidado v2 + add-on v3)
+# Backend Vidya Force - Testes Globais (v2 + add-on v3)
 
 Este repositório contém o script **global** de testes automatizados para ser utilizado na collection:
 
