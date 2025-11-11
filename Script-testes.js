@@ -1,5 +1,5 @@
 // =======================================================
-// BACKEND VIDYA FORCE - TESTES GLOBAIS DINÂMICOS (v2)
+// BACKEND VIDYA FORCE - TESTES GLOBAIS DINÂMICOS (v3.3)
 // =======================================================
 
 // =======================================================
@@ -1168,6 +1168,174 @@ if (isJson && isBaseListResponse(json)) {
       pm.expect(ok, 'Lista de solicitações deve ser array').to.be.true;
     });
   }
+})();
+
+
+
+
+// H) AUTH — JWT claims mínimos (apenas em fluxos de autenticação)
+(function jwtClaims(){
+  if (!(isJson && /\/login|\/newlogin|\/refresh|\/token/i.test(url))) return;
+  const tok = (json && (json.token || json.accessToken || (json.data && json.data.token))) || '';
+  if (!tok || tok.split('.').length < 2) return;
+  function parseJwt(t){
+    const p = t.split('.');
+    const seg = (p[1]||'');
+    if (!seg) return null;
+    const b64 = seg.replace(/-/g,'+').replace(/_/g,'/').padEnd((seg.length + 3) & ~3, '=');
+    try { return JSON.parse(atob(b64)); } catch(e){ return null; }
+  }
+  const claims = parseJwt(tok);
+  pm.test('[AUTH] JWT possui exp >= 5min', () => {
+    pm.expect(!!(claims && claims.exp), 'exp ausente').to.be.true;
+    if (claims && claims.exp){
+      const now = Math.floor(Date.now()/1000);
+      pm.expect(claims.exp - now, 'exp muito próximo').to.be.above(300);
+    }
+  });
+})();
+
+
+// I) OBS — Correlation/Trace ID presente (qualquer resposta)
+(function correlationId(){
+  const corr = res.headers.get('X-Request-ID') || res.headers.get('X-Correlation-ID') || res.headers.get('traceparent');
+  pm.test('[OBS] Correlation/Trace ID presente', () => pm.expect(!!corr).to.be.true);
+})();
+
+
+// J) RATE — Cabeçalhos de rate limit coerentes (opcional)
+(function rateHeaders(){
+  const lim = res.headers.get('RateLimit-Limit') || res.headers.get('X-RateLimit-Limit');
+  const rem = res.headers.get('RateLimit-Remaining') || res.headers.get('X-RateLimit-Remaining');
+  if (!lim && !rem) return; // só valida se existirem
+  pm.test('[RATE] Remaining <= Limit', () => {
+    pm.expect(Number(rem)).to.be.at.most(Number(lim));
+  });
+})();
+
+
+// K) TIME — Timestamps em ISO 8601 (UTC) quando houver campos de data
+(function isoUtc(){
+  if (!isJson) return;
+  const txt = JSON.stringify(json);
+  const hasDateFields = /(\bdata\b|\bdate\b|\bdtemissao\b|\bcreated\b|\bupdated\b|\btimestamp\b)/i.test(txt);
+  if (!hasDateFields) return;
+  const iso = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/;
+  pm.test('[TIME] Campos de data em ISO 8601 (UTC)', () => {
+    pm.expect(iso.test(txt), 'Formato de data não está em ISO 8601 (UTC)').to.be.true;
+  });
+})();
+
+
+// L) HTTP — Content-Type adequado para corpo JSON
+(function jsonContentType(){
+  const ct = (res.headers.get('Content-Type') || '').toLowerCase();
+  let looksJson = false;
+  try {
+    const t = pm.response.text().trim();
+    looksJson = (t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'));
+  } catch(_) {}
+  if (looksJson && !ct.includes('application/json')) {
+    pm.test('[HTTP] Content-Type deve ser application/json quando o corpo é JSON', () => {
+      pm.expect(ct).to.include('application/json');
+    });
+  }
+})();
+
+
+// M) SEC — Flags de cookies (Secure/HttpOnly) quando o servidor define cookies
+(function cookieFlags(){
+  const setc = res.headers.get('Set-Cookie') || '';
+  if (!setc) return;
+  const lc = setc.toLowerCase();
+  pm.test('[SEC] Cookies com Secure/HttpOnly', () => {
+    pm.expect(lc.includes('secure')).to.be.true;
+    pm.expect(lc.includes('httponly')).to.be.true;
+  });
+})();
+
+
+// N) MONEY — Consistência: soma dos itens ≈ total (tolerância 0,05)
+(function moneyConsistency(){
+  if (!isJson) return;
+  if (!(/\/ppid\/orderdetails|\/ppid\/pedido/i.test(url))) return;
+  const itens = json && (json.itens || json.items || (Array.isArray(json.data) && json.data[0] && json.data[0].itens));
+  if (!Array.isArray(itens) || !itens.length) return;
+  const total = Number(json.total || json.valorTotal || json.totalLiquido || json.totalliquido || 0);
+  if (!isFinite(total) || total <= 0) return;
+  const sum = itens.reduce((acc, it) => {
+    const sub = Number(it.subtotal || it.valor || it.total || (Number(it.preco || it.precoUnit || it.price) * Number(it.qtd || it.quantidade || it.qty || 1)) || 0);
+    return acc + (isFinite(sub) ? sub : 0);
+  }, 0);
+  pm.test('[MONEY] Soma de itens ≈ total', () => {
+    pm.expect(Math.abs(sum - total)).to.be.below(0.05);
+  });
+})();
+
+
+// O) SCHEMA — Baseline de chaves para detectar drift (primeiro run salva)
+(function schemaDrift(){
+  if (!isJson || !json || typeof json !== 'object') return;
+  const path = req.url.getPath();
+  const key  = `v3_schema::${req.method}::${path}`;
+  const sample = Array.isArray(json) ? json[0] : (Array.isArray(json.data) ? json.data[0] : json);
+  if (!sample || typeof sample !== 'object') return;
+  const keys = Object.keys(sample).sort().join(',');
+  const prev = pm.collectionVariables.get(key);
+  if (prev) {
+    pm.test('[SCHEMA] Conjunto de chaves estável', () => pm.expect(keys).to.eql(prev));
+  } else {
+    pm.collectionVariables.set(key, keys); // baseline inicial
+  }
+})();
+
+
+// P) CACHE — Presença de ETag/Last-Modified em GET 2xx (revalidação opcional)
+(function cacheHeaders(){
+  if (!(status >= 200 && status < 300)) return;
+  if (req.method !== 'GET') return;
+  const etag = res.headers.get('ETag');
+  const lm   = res.headers.get('Last-Modified');
+  pm.test('[CACHE] ETag ou Last-Modified presente em GET', () => {
+    pm.expect(!!etag || !!lm).to.be.true;
+  });
+})();
+
+
+// Q) SLA — Coleta tempos para percentis (p95/p99) em request de relatório
+(function slaCollect(){
+  const k='v3_metrics::times';
+  try {
+    const arr = JSON.parse(pm.collectionVariables.get(k) || '[]');
+    arr.push(pm.response.responseTime);
+    pm.collectionVariables.set(k, JSON.stringify(arr.slice(-1000)));
+  } catch(_) { /* ignorar */ }
+})();
+
+
+// R) PAGE — Sanidade de pageSize e retorno array em endpoints paginados
+(function paginationBoundaries(){
+  if (!(isJson && /\/getprices|\/gettableprices|\/orderlist|\/partner\/list/i.test(url))) return;
+  const qp = req.url.query ? req.url.query.toObject() : {};
+  const size = Number(qp.pageSize || qp.take || qp.limit || 0);
+  if (size) {
+    pm.test('[PAGE] pageSize dentro do intervalo 1..200', () => pm.expect(size).to.be.within(1,200));
+  }
+  const arr = getMainArray(json);
+  pm.test('[PAGE] Retorno é array em endpoints paginados', () => pm.expect(Array.isArray(arr)).to.be.true);
+})();
+
+
+// S) UPLOAD — Nome de arquivo seguro após upload (quando o backend ecoa filename)
+(function uploadFilenameSafety(){
+  if (!(isJson && /\/saveattachment/i.test(url))) return;
+  const name = (json && (json.fileName || json.filename || (json.data && json.data.fileName)));
+  if (!name) return;
+  pm.test('[UPLOAD] Nome de arquivo sem path traversal', () => {
+    pm.expect(name).to.not.match(/[\\/]/);
+    pm.expect(name).to.not.include('..');
+    pm.expect(String(name).length).to.be.within(1, 255);
+  });
 })();
 
 })(); // fim do ADD-ON v3
