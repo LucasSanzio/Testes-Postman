@@ -789,4 +789,339 @@ if (isJson && isBaseListResponse(json)) {
     });
 }
 
-// Fim do script v2.
+
+// =======================================================
+// BACKEND VIDYA FORCE - ADD-ON TESTS (v3)
+// Complementa o seu v2 com:
+// - Validação de BINÁRIOS (PDF/DANFE/BOLETO/IMAGENS)
+// - Paginação entre páginas (sem repetir itens)
+// - Invariantes cross-endpoints (anexo->list, foto->imagem, parceiro->list)
+// - Idempotência/negativos padronizados em mutações críticas
+// - Pequenas proteções de segurança e consistência
+// =======================================================
+(function V3_ADDON() {
+  // ---------- Contexto local seguro (não conflita com v2) ----------
+  const req = pm.request;
+  const res = pm.response;
+
+  const rawUrl = req.url.toString();
+  const url = rawUrl.toLowerCase();
+  const status = res.code;
+  const contentType = (res.headers.get('Content-Type') || '').toLowerCase();
+  const isJson = contentType.includes('application/json');
+
+  let json = null;
+  if (isJson) {
+    try { json = res.json(); } catch (_) { /* deixa o v2 apontar JSON inválido */ }
+  }
+
+  const requestName = (pm.info.requestName || '').toLowerCase();
+  const isNegativeCase =
+    requestName.includes('[negativo]') ||
+    requestName.includes('[error]')    ||
+    requestName.includes('[erro]')     ||
+    requestName.includes('[4xx]')      ||
+    requestName.includes('[5xx]')      ||
+    requestName.includes('[sem auth]') ||
+    requestName.includes('[sem accessdata]');
+
+  const pathSegments = (req.url.path || []).filter(Boolean).map(s => String(s).toLowerCase());
+
+  function getModuleKey() {
+    if (!pathSegments.length) return 'root';
+    if (pathSegments[0] === 'ppid') {
+      if (pathSegments[1]) return 'ppid_' + pathSegments[1];
+      return 'ppid_root';
+    }
+    return pathSegments[0];
+  }
+  const moduleKey = getModuleKey();
+
+  // Helpers rápidos
+  function getMainArray(body) {
+    if (!body) return [];
+    if (Array.isArray(body)) return body;
+    if (Array.isArray(body.data)) return body.data;
+    return [];
+  }
+  function ensureFieldType(value, types) {
+    const t = Array.isArray(types) ? types : [types];
+    const isOk = t.some(tt => typeof value === tt || (tt === 'array' && Array.isArray(value)));
+    pm.expect(isOk, `Tipo inesperado. Esperado: ${t.join('/')}; Recebido: ${typeof value}`).to.be.true;
+  }
+  function getBaseUrl() {
+    const c = pm.collectionVariables.get('baseUrl');
+    if (c) return c;
+    const u = req.url;
+    const proto = (u.protocol || 'http');
+    const host = Array.isArray(u.host) ? u.host.join('.') : (u.host || 'localhost');
+    const port = u.port ? `:${u.port}` : '';
+    return `${proto}://${host}${port}`;
+  }
+  const BASE = getBaseUrl();
+  const AUTH = (pm.environment.get('auth_token') || pm.collectionVariables.get('auth_token')) ? `Basic ${pm.environment.get('auth_token') || pm.collectionVariables.get('auth_token')}` : undefined;
+  const CODVEND = pm.environment.get('codVend') || pm.collectionVariables.get('codVend') || '1';
+
+  // =======================================================
+  // A) BINÁRIOS (PDF / DANFE / BOLETO / IMAGENS)
+  // =======================================================
+  (function binaryChecks() {
+    const ct = contentType;
+    const u = url;
+
+    // PDF-like
+    if (u.includes('/viewpdf') || u.includes('/viewdanfe') || u.includes('/viewboleto')) {
+      pm.test('[BINARIO] Content-Type PDF', () => pm.expect(ct).to.include('application/pdf'));
+      pm.test('[BINARIO] Tamanho > 1KB', () => pm.expect(res.responseSize).to.be.above(1024));
+      pm.test('[BINARIO] Content-Disposition presente', () => {
+        const cd = res.headers.get('Content-Disposition') || '';
+        pm.expect(cd.length > 0, 'Content-Disposition ausente').to.be.true;
+      });
+    }
+
+    // Imagens (produto/usuário)
+    if (u.includes('/imagem/')) {
+      pm.test('[BINARIO] Content-Type imagem', () =>
+        pm.expect(ct).to.match(/image\/(png|jpe?g|webp)/));
+      pm.test('[BINARIO] Tamanho > 512B', () => pm.expect(res.responseSize).to.be.above(512));
+    }
+  })();
+
+  // =======================================================
+  // B) PAGINAÇÃO (ex.: /ppid/getPrices?page=N)
+  //    - Garante que itens não se repetem entre páginas na MESMA execução
+  // =======================================================
+  (function paginationChecks() {
+    if (!isJson || !url.includes('/ppid/getprices')) return;
+    const data = getMainArray(json);
+    const q = req.url.query || [];
+    const qPage = q.find(x => x.key === 'page');
+    const page = qPage ? Number(qPage.value) : undefined;
+
+    if (!Array.isArray(data)) return;
+
+    // Extrai um "id" chave por item (tente cobrir cenários comuns)
+    const ids = Array.from(new Set(
+      data.map(it =>
+        it.id || it.Id || it.ID ||
+        it.codProd || it.CODPROD || it.codprod ||
+        it.codigo || it.CODIGO || it.sku || it.SKU
+      ).filter(Boolean).map(String)
+    ));
+
+    const seenKey = `v3_seen_ids::getprices`;
+    const seenRaw = pm.environment.get(seenKey) || '';
+    const seen = new Set(seenRaw ? seenRaw.split(',') : []);
+
+    const dups = ids.filter(id => seen.has(String(id)));
+    pm.test('[PAG] Itens não se repetem entre páginas (até aqui)', () => {
+      pm.expect(dups.length, `Repetidos entre páginas: ${dups.join(',')}`).to.eql(0);
+    });
+
+    // Atualiza conjunto visto
+    const merged = new Set([...seen, ...ids]);
+    pm.environment.set(seenKey, Array.from(merged).join(','));
+
+    // Coerência com a query
+    if (page !== undefined && json.page !== undefined) {
+      pm.test('[PAG] "page" coerente entre query e resposta', () => {
+        pm.expect(Number(json.page)).to.eql(Number(page));
+      });
+    }
+  })();
+
+  // =======================================================
+  // C) INVARIANTES CROSS-ENDPOINTS
+  // =======================================================
+  // C.1) Parceiro: após /partner/save, o parceiro deve aparecer no /partner/list
+  (function partnerSaveAppearsOnList() {
+    if (!isJson || status < 200 || status >= 300) return;
+    if (!url.includes('/partner/save')) return;
+
+    // Tenta identificar um campo que possamos pesquisar (CNPJ/CPF ou nome)
+    let body = {};
+    try {
+      if (req.body && req.body.mode === 'raw' && req.body.raw) body = JSON.parse(req.body.raw);
+    } catch (_) {}
+
+    const doc = (body.cgc_cpf || body.cnpj || body.CGC_CPF || '').toString().replace(/\D/g, '');
+    const nome = body.nomeParc || body.razaoSocial || body.nome || '';
+
+    pm.sendRequest({
+      url: `${BASE}/partner/list?codVend=${CODVEND}`,
+      method: 'GET',
+      header: [
+        AUTH ? { key: 'Authorization', value: AUTH } : null,
+        { key: 'accessData', value: pm.environment.get('accessData') || pm.collectionVariables.get('accessData') || '' },
+      ].filter(Boolean)
+    }, (err, r) => {
+      pm.test('[CROSS] /partner/save reflete em /partner/list', () => {
+        pm.expect(err).to.eql(null);
+        pm.expect(r.code).to.be.within(200, 299);
+        try {
+          const j = r.json();
+          const arr = Array.isArray(j) ? j : getMainArray(j);
+          const ok = arr.some(p => {
+            const d = (p.CGC_CPF || p.cgc_cpf || '').toString().replace(/\D/g, '');
+            const n = (p.NOMEPARC || p.nomeParc || p.NOME || p.nome || '').toString().toLowerCase();
+            return (doc && d === doc) || (nome && n.includes(nome.toLowerCase()));
+          });
+          pm.expect(ok, 'Parceiro salvo não localizado em /partner/list').to.be.true;
+        } catch (_) {
+          pm.expect.fail('Resposta de /partner/list não é JSON válido');
+        }
+      });
+    });
+  })();
+
+  // C.2) Pedido: após salvar anexo => /ppid/{nunota}/listAttachment deve aumentar
+  (function orderAttachmentIncreasesList() {
+    if (status < 200 || status >= 300) return;
+    const m = rawUrl.match(/\/ppid\/(\d+)\/saveattachment/i);
+    if (!m) return;
+    const nunota = m[1];
+
+    pm.sendRequest({
+      url: `${BASE}/ppid/${nunota}/listAttachment?codVend=${CODVEND}`,
+      method: 'GET',
+      header: [
+        AUTH ? { key: 'Authorization', value: AUTH } : null,
+        { key: 'accessData', value: pm.environment.get('accessData') || pm.collectionVariables.get('accessData') || '' },
+      ].filter(Boolean)
+    }, (err, r) => {
+      pm.test('[CROSS] Anexo refletiu em listAttachment', () => {
+        pm.expect(err).to.eql(null);
+        pm.expect(r.code).to.be.within(200, 299);
+        try {
+          const j = r.json();
+          const arr = getMainArray(j);
+          pm.expect(Array.isArray(arr) && arr.length > 0, 'Nenhum anexo listado após upload').to.be.true;
+        } catch (_) {
+          pm.expect.fail('Resposta de listAttachment não é JSON válido');
+        }
+      });
+    });
+  })();
+
+  // C.3) Usuário: após changePhoto => /user/{id}/imagem deve retornar imagem válida
+  (function userChangePhotoThenImage() {
+    if (status < 200 || status >= 300) return;
+    const m = rawUrl.match(/\/user\/(\d+)\/changephoto/i);
+    if (!m) return;
+    const uid = m[1];
+
+    pm.sendRequest({
+      url: `${BASE}/user/${uid}/imagem`,
+      method: 'GET',
+      header: [
+        AUTH ? { key: 'Authorization', value: AUTH } : null,
+        { key: 'accessData', value: pm.environment.get('accessData') || pm.collectionVariables.get('accessData') || '' },
+      ].filter(Boolean)
+    }, (err, r) => {
+      pm.test('[CROSS] changePhoto refletiu em imagem', () => {
+        pm.expect(err).to.eql(null);
+        pm.expect(r.code).to.be.within(200, 299);
+        const ct = (r.headers.get('Content-Type') || '').toLowerCase();
+        pm.expect(ct).to.match(/image\/(png|jpe?g|webp)/);
+        pm.expect(r.responseSize).to.be.above(512);
+      });
+    });
+  })();
+
+  // =======================================================
+  // D) IDEMPOTÊNCIA E NEGATIVOS PADRONIZADOS EM MUTAÇÕES
+  // =======================================================
+  // D.1) confirmarPedido duas vezes não deve passar “em silêncio”
+  (function doubleConfirmGuard() {
+    if (!url.includes('/ppid/confirmarpedido') || status < 200 || status >= 300) return;
+
+    // Reenvia a mesma requisição 1x para checar idempotência/erro controlado
+    const cloneReq = {
+     url: rawUrl,
+     method: req.method,
+     header: (req.headers && typeof req.headers.toJSON === 'function')
+        ? req.headers.toJSON() : [],
+     body: req.body ? { mode: req.body.mode, raw: req.body.raw } : undefined
+    };
+
+    pm.sendRequest(cloneReq, (err, r) => {
+      pm.test('[IDEMP] confirmarPedido 2ª vez deve retornar erro controlado', () => {
+        pm.expect(err).to.eql(null);
+        const ok = r.code >= 400 || (function () {
+          try { const j = r.json(); return j.hasError === true; } catch { return false; }
+        })();
+        pm.expect(ok, 'Confirmar 2x voltou sucesso — esperar erro controlado').to.be.true;
+      });
+    });
+  })();
+
+  // D.2) excluirItemPedido duas vezes => erro controlado
+  (function doubleDeleteItem() {
+    if (!url.includes('/ppid/excluiritempedido') || status < 200 || status >= 300) return;
+
+    const cloneReq = {
+     url: rawUrl,
+     method: req.method,
+     header: (req.headers && typeof req.headers.toJSON === 'function')
+        ? req.headers.toJSON() : [],
+     body: req.body ? { mode: req.body.mode, raw: req.body.raw } : undefined
+};
+
+    pm.sendRequest(cloneReq, (err, r) => {
+      pm.test('[IDEMP] excluirItemPedido 2ª vez deve retornar erro controlado', () => {
+        pm.expect(err).to.eql(null);
+        const ok = r.code >= 400 || (function () {
+          try { const j = r.json(); return j.hasError === true; } catch { return false; }
+        })();
+        pm.expect(ok, 'Excluir 2x voltou sucesso — esperar erro controlado').to.be.true;
+      });
+    });
+  })();
+
+  // =======================================================
+  // E) NEGATIVOS ORQUESTRADOS PELO NOME DO REQUEST
+  //     (crie clones com sufixos como [NEGATIVO][SEM AUTH], etc.)
+  // =======================================================
+  (function negativeConventions() {
+    if (!isNegativeCase) return;
+
+    // Sugestões de expectativas por sufixo no nome:
+    if (requestName.includes('[sem auth]')) {
+      pm.test('[NEG] Sem Authorization deve responder 401/403', () => {
+        pm.expect([401, 403]).to.include(status);
+      });
+    }
+    if (requestName.includes('[sem accessdata]')) {
+      pm.test('[NEG] Sem accessData deve responder 401/403/400', () => {
+        pm.expect([400, 401, 403]).to.include(status);
+      });
+    }
+    if (requestName.includes('[id inexistente]') || requestName.includes('[inexistente]')) {
+      pm.test('[NEG] Recurso inexistente => 404/400', () => {
+        pm.expect([404, 400]).to.include(status);
+      });
+    }
+    // Sempre que for erro, exige mensagem clara no JSON (se JSON)
+    if (isJson && (status >= 400)) {
+      pm.test('[NEG] Erro JSON tem mensagem', () => {
+        const m = (json && (json.message || json.mensagem || json.error)) || null;
+        pm.expect(!!m, 'Erro sem mensagem clara').to.be.true;
+      });
+    }
+  })();
+
+  // =======================================================
+  // F) SEGURANÇA ADICIONAL (hardening leve)
+  // =======================================================
+  (function extraSecurity() {
+    if (!isJson || !json) return;
+    const asText = JSON.stringify(json).toLowerCase();
+
+    pm.test('[SEC] Resposta não devolve segredo/senha/token em claro', () => {
+      const banned = ['"password":', '"senha":', '"secret":', '"secreto":', '"auth":', '"token":'];
+      const hit = banned.some(b => asText.includes(b));
+      pm.expect(hit, 'Campos sensíveis não deveriam voltar em claro').to.be.false;
+    });
+  })();
+
+})(); // fim do ADD-ON v3
