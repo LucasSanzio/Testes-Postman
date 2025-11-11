@@ -54,6 +54,21 @@ A versão **v2** mantém toda a lógica da versão anterior, porém:
 - **Boas práticas de Runner:** recomenda-se executar com **Persist variables = OFF** e iniciar pela requisição **“00 – [RESET FLAGS]”**; o bootstrap ajuda mesmo quando alguém esquece o reset.
 - **Compatibilidade total:** tudo é incremental; V2/V3 permanecem ativos e inalterados. Se a suíte já cobria algum ponto, o novo guard apenas retorna “N/A” (não aumenta falsos negativos).
 
+### Refinamentos aplicados (v3.3)
+
+- JWT (claims mínimos): em fluxos de autenticação, valida presença de `exp` e expiração ≥ 5 min.
+- Observabilidade: exige `X-Request-ID`/`X-Correlation-ID`/`traceparent` em respostas.
+- Rate limit: quando presentes, verifica `Remaining ≤ Limit`.
+- Timestamps ISO-8601/UTC: campos de data padronizados (evita problemas de fuso).
+- Content-Type para JSON: se o corpo *parece* JSON, exige `application/json`.
+- Cookies seguros: quando há `Set-Cookie`, exige flags `Secure` e `HttpOnly`.
+- Consistência monetária: soma de itens ≈ total (tolerância 0,05) em detalhes de pedido.
+- Baseline de schema: salva conjunto de chaves por rota/método e alerta drift.
+- Cache HTTP: em GET 2xx, exige `ETag` ou `Last-Modified` (revalidação opcional).
+- SLA percentis: coleta `responseTime` para cálculo de p95/p99 em request de relatório.
+- Paginação — limites: `pageSize` dentro de 1..200 e retorno como array.
+- Uploads: filename ecoado sem `../`/`/`/`\` e tamanho 1..255.
+
 ### Como usar a suíte final (v2 + v3)
 1. **Collection ▸ Pre-request Script**: mantenha o bloco que injeta `Authorization` e `accessData` automaticamente.
 2. **Collection ▸ Tests**: deixe o **Add-on v3 colado abaixo do v2** (os dois permanecem ativos).
@@ -342,3 +357,5 @@ Para BaseList:
   - Detecção de possíveis documentos duplicados (`CGC_CPF`).
 
 ---
+
+
