@@ -1,4 +1,4 @@
-# Backend Vidya Force - Testes Globais (v2 + add-on v3)
+# Backend Vidya Force - Testes Globais (v3 — consolidado v2 + add-on v3)
 
 Este repositório contém o script **global** de testes automatizados para ser utilizado na collection:
 
@@ -27,6 +27,23 @@ A versão **v2** mantém toda a lógica da versão anterior, porém:
 - **Negativos padronizados pelo nome**: sufixos no **nome do request** como `[NEGATIVO]`, `[SEM AUTH]`, `[SEM ACCESSDATA]`, `[ID INEXISTENTE]` disparam expectativas de **400/401/403/404** e exigem **mensagem clara** no JSON de erro.
 - **Hardening de segurança**: previne vazamento de campos sensíveis (`password`, `senha`, `secret`, etc.).
 - **Reset real de flags**: o request **“00 – [RESET FLAGS]”** agora limpa variáveis `skip_*` e caches auxiliares (ex.: `v3_seen_ids::getprices`).
+
+### Refinamentos aplicados (v3.1)
+
+- Binários condicionados: validações de PDF/DANFE/BOLETO e imagens agora só executam quando a resposta for 2xx e não-JSON (evita conflito com erros legítimos retornados em JSON).
+- Whitelist de segurança (auth/token): em rotas de autenticação (/login, /newLogin, /refresh, /token), campos como auth/token não são considerados vazamento; nas demais rotas, permanecem bloqueados, além de password/senha/secret.
+- Paginação com namespace por vendedor: a chave de controle de itens já vistos passou a incluir o codVend (ex.: v3_seen_ids::getprices::<codVend>), evitando “repetidos” falsos quando múltiplos vendedores são exercitados na mesma suíte.
+- Idempotência robusta: os replays das mutações críticas clonam o corpo em raw, x-www-form-urlencoded e form-data, garantindo que o segundo envio seja equivalente ao primeiro.
+- Obrigatoriedade de accessData: rotas /ppid/ agora exigem, via teste dedicado, a presença do header accessData (valor não vazio) para padronização do contrato.
+- Checks leves adicionais: validações mínimas (seguras) para mensagens (/ppid/message) e solicitações de entrega (/ppid/solicitacoesEntrega), reforçando a cobertura sem acoplamento excessivo.
+
+### Refinamentos aplicados (v3.2)
+
+- **Binários blindados:** PDF/DANFE/BOLETO agora verificam assinatura `%PDF-` e tamanho mínimo; imagens checam MIME e tamanho (>512B). Impacto: evita aceitar HTML/erros como arquivo válido.
+- **Paginação à prova de erro:** adicionados casos de borda `[PAGE OUT OF RANGE]` e coerência `query.page == body.page`, mantendo o namespace por vendedor em `v3_seen_ids::<rota>::{{codVend}}`.
+- **Headers por domínio:** rotas `/ppid/` exigem `accessData` não vazio; pre-request corrige typos (`accesData→accessData`) e injeta faltantes automaticamente.
+- **Negativos padronizados:** sufixos como `[SEM AUTH]`, `[SEM ACCESSDATA]`, `[ID INEXISTENTE]`, `[PAGE OUT OF RANGE]` ganham asserts específicos (4xx + mensagem clara).
+- **Multi-cliente simples:** variável `ENV_CHOICE` seleciona `baseUrl_*` (DEV/HML/PRD) sem editar requests.
 
 ### Como usar a suíte final (v2 + v3)
 1. **Collection ▸ Pre-request Script**: mantenha o bloco que injeta `Authorization` e `accessData` automaticamente.
@@ -124,6 +141,7 @@ Quando detectado `{ hasError, qtdRegistros, data[] }`:
   - Itens de `data` são objetos.
 - Paginação (se presente):
   - `page`, `pageSize`, `totalPages` numéricos.
+  - O controle de itens já vistos considera o `codVend` para evitar falsos "repetidos" quando múltiplos vendedores são testados na mesma execução.
 
 ---
 
@@ -241,6 +259,9 @@ Valida:
 
 ### Documentos (Danfe/Boleto/PDF)
 
+> Nota: os checks de binário só se aplicam a respostas **2xx** e **não-JSON**.
+
+
 - Para erros em JSON:
   - Devem seguir padrão `hasError` + mensagem.
 
@@ -291,6 +312,9 @@ Para respostas JSON com `status >= 400`:
 ---
 
 ## Segurança
+
+**Observação:** nas rotas de autenticação (`/login`, `/newLogin`, `/refresh`, `/token`), campos `auth/token` são aceitos; nas demais rotas permanecem bloqueados (além de `password/senha/secret`).
+
 
 - Verifica se o JSON **não** expõe:
   - `password`, `senha`, `secret`, `segredo`.
