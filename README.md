@@ -1,4 +1,4 @@
-# Backend Vidya Force - Testes Globais (v3 — consolidado v2 + add-on v3)
+# Backend Vidya Force - Testes Globais (v3.4)
 
 Este repositório contém o script **global** de testes automatizados para ser utilizado na collection:
 
@@ -68,6 +68,31 @@ A versão **v2** mantém toda a lógica da versão anterior, porém:
 - SLA percentis: coleta `responseTime` para cálculo de p95/p99 em request de relatório.
 - Paginação — limites: `pageSize` dentro de 1..200 e retorno como array.
 - Uploads: filename ecoado sem `../`/`/`/`\` e tamanho 1..255.
+
+### Refinamentos aplicadps (v3.4)
+
+### 1. Detecção robusta de JSON
+- **Antes**: regex com `\bjson\b` podia falhar em alguns *Content-Types*.
+- **Agora**: `contentType.toLowerCase().includes('json')`.
+- **Efeito**: evita falsos “não‑JSON” e testes indevidamente pulados.
+
+### 2. Normalização do *path* para *schema key*
+- A chave do baseline passou a ser calculada por **segmentos da URL** (`req.url.path`):
+  - *Join* com `/`, **remoção de barra final**, **lower‑case**.
+  - Ex.: `"/ppid/getPrices/"` → `"/ppid/getprices"`.
+- **Efeito**: evita *drift* artificial quando a mesma rota é chamada com ou sem barra final.
+
+### 3. Mapa explícito para `/ppid/getprices`
+- Inclusão do `SCHEMA_KEYS['/ppid/getprices']` com chaves esperadas:
+  - `codProd,codTab,nomeTab,nuTab,preco,precoFlex`.
+- **Efeito**: validação **estrita** para o endpoint de preços.
+
+### 4. Baseline de schema mais tolerante
+- Se a chave não existir no mapa, usa **baseline por endpoint**: `v3_schema::<METHOD>::<pathNormalizado>`.
+- O sentinel legado `'erro'` **não** dispara falha: baseline é **criado/atualizado** no primeiro run válido.
+- Adicionada verificação de **uniformidade**: todos os itens do array devem ter o **mesmo conjunto** de chaves do baseline.
+
+> **Compatibilidade**: se você possuía baselines antigos salvos com *path* diferente (ex.: com barra final), a primeira execução gravará a chave normalizada. Se quiser preservar o histórico manualmente, copie o valor antigo para `v3_schema::<METHOD>::<pathNormalizado>` antes do run.
 
 ### Como usar a suíte final (v2 + v3)
 1. **Collection ▸ Pre-request Script**: mantenha o bloco que injeta `Authorization` e `accessData` automaticamente.
