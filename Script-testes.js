@@ -1,5 +1,5 @@
 // =======================================================
-// BACKEND VIDYA FORCE - TESTES GLOBAIS DINÂMICOS (v3.3)
+// BACKEND VIDYA FORCE - TESTES GLOBAIS DINÂMICOS (v3.4)
 // =======================================================
 
 // =======================================================
@@ -1273,22 +1273,85 @@ if (isJson && isBaseListResponse(json)) {
 })();
 
 
-// O) SCHEMA — Baseline de chaves para detectar drift (primeiro run salva)
-(function schemaDrift(){
-  if (!isJson || !json || typeof json !== 'object') return;
-  const path = req.url.getPath();
-  const key  = `v3_schema::${req.method}::${path}`;
-  const sample = Array.isArray(json) ? json[0] : (Array.isArray(json.data) ? json.data[0] : json);
-  if (!sample || typeof sample !== 'object') return;
-  const keys = Object.keys(sample).sort().join(',');
-  const prev = pm.collectionVariables.get(key);
-  if (prev) {
-    pm.test('[SCHEMA] Conjunto de chaves estável', () => pm.expect(keys).to.eql(prev));
-  } else {
-    pm.collectionVariables.set(key, keys); // baseline inicial
+// O) SCHEMA — Conjunto de chaves estável (robusto, com normalização e try/catch)
+(function schemaStableKeys(){
+  try {
+    const res = pm.response;
+    const req = pm.request;
+
+    // Reaproveita helpers se existirem; caso contrário, auto-detecta
+    let _isJson = (typeof isJson !== 'undefined') ? isJson : false;
+    let _json = (typeof json !== 'undefined') ? json : null;
+
+    if (!_isJson) {
+        const ct = (res.headers.get('Content-Type') || '').toLowerCase();
+        _isJson = ct.includes('json'); // simples e seguro
+    }
+
+    if (!_json && _isJson) {
+      try { _json = res.json(); } catch(_e) { /* noop */ }
+    }
+    if (!_isJson || !_json || typeof _json !== 'object') return;
+
+    // Normaliza path: usa segmentos do Postman, remove barra final, lower-case
+    const segs = (req && req.url && Array.isArray(req.url.path) ? req.url.path : []).filter(Boolean).map(String);
+    const pathKey = ('/' + segs.join('/')).replace(/\/+$/,'').toLowerCase(); // ex.: "/ppid/getprices"
+
+    // Amostra de chaves (prioriza primeiro item do array)
+    const pickSample = (j) => Array.isArray(j) ? j[0] : (Array.isArray(j.data) ? j.data[0] : j);
+    const sample = pickSample(_json);
+    if (!sample || typeof sample !== 'object') return;
+
+    const toKeySet = (o) => Object.keys(o || {}).sort().join(',');
+    const actual = toKeySet(sample);
+
+    // Mapa de schemas explícitos por endpoint (ordenado para comparação)
+    const SCHEMA_KEYS = {
+      '/ppid/getprices': toKeySet({ codProd:1, codTab:1, nomeTab:1, nuTab:1, preco:1, precoFlex:1 }),
+      // Adicione outros endpoints aqui, se quiser validação estrita
+    };
+
+    const expected = SCHEMA_KEYS[pathKey];
+
+    if (expected) {
+      // Validação estrita pelo mapa
+      pm.test('[SCHEMA] Conjunto de chaves estável', function(){
+        pm.expect(actual).to.eql(expected);
+      });
+
+      // Checagem de uniformidade de itens no array
+      const arr = Array.isArray(_json?.data) ? _json.data : (Array.isArray(_json) ? _json : []);
+      if (Array.isArray(arr) && arr.length) {
+        const divergente = arr.find(it => toKeySet(it) !== expected);
+        pm.test('[SCHEMA] Todos os itens seguem o mesmo conjunto de chaves', function(){
+          pm.expect(divergente, 'Itens divergentes no conjunto de chaves').to.be.undefined;
+        });
+      }
+      return; // Já validado por mapa
+    }
+
+    // Baseline por endpoint (robusto) — ignora baselines antigos gravados como 'erro'
+    const baseKey = `v3_schema::${req.method}::${pathKey}`;
+    const prevRaw = pm.collectionVariables.get(baseKey);
+    const prev = (typeof prevRaw === 'string' && prevRaw.toLowerCase() === 'erro') ? null : prevRaw;
+
+    if (prev) {
+      pm.test('[SCHEMA] Conjunto de chaves estável (baseline)', function(){
+        pm.expect(actual).to.eql(prev);
+      });
+    } else {
+      pm.collectionVariables.set(baseKey, actual);
+      pm.test('[SCHEMA] Baseline inicial registrada', function(){
+        pm.expect(true).to.be.true;
+      });
+    }
+  } catch(err) {
+    // Não derruba o runner por erro de script; registra de forma controlada
+    pm.test('[SCHEMA] Erro de script (tratado)', function(){
+      pm.expect.fail(String(err && err.message || err));
+    });
   }
 })();
-
 
 // P) CACHE — Presença de ETag/Last-Modified em GET 2xx (revalidação opcional)
 (function cacheHeaders(){
